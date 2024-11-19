@@ -1,2 +1,2 @@
 # Modeling_Dynamic_Systems
-Forschungspraxis an dem ITR Lehrstuhl
+Forschungspraxis an dem Lehrstuhl ITR
