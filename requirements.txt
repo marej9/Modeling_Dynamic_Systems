@@ -35,7 +35,7 @@ pyzmq==26.2.0
 scipy==1.14.1
 six==1.16.0
 stack-data==0.6.3
-torch==2.5.1 
+torch==2.5.1
 tornado==6.4.1
 traitlets==5.14.3
 typing_extensions==4.12.2
