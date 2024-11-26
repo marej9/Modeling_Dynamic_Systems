@@ -18,7 +18,7 @@ def lorenz_deriv(state, t, sigma, rho, beta):
     return [dx_dt, dy_dt, dz_dt]
 
 # Initial conditions and time span
-initial_state = [1.0, 1.0, 1.0]  # Starting point in phase space
+initial_state = [50.0, 50.0, 50.5]  # Starting point in phase space
 t = np.linspace(0, 50, 10000)    # Time grid for integration
 
 # Numerical integration of the Lorenz equations
@@ -29,7 +29,7 @@ x, y, z = trajectory.T
 
 # Save the dataset to a CSV file
 data = pd.DataFrame({'Time': t, 'X': x, 'Y': y, 'Z': z})
-data.to_csv('lorenz_attractor_dataset.csv', index=False)
+data.to_csv('lorenz_attractor_dataset_test.csv', index=False)
 print("Dataset saved to 'lorenz_attractor_dataset.csv'.")
 
 # Plotting the Lorenz attractor
