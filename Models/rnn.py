@@ -164,7 +164,7 @@ def train(model: nn.Module, data: DataLoader, epochs: int, optimizer: optim.Opti
 
 if __name__ == "__main__":
     # Hyperparameter
-    file_path = "D:\Master_EI\FP\Modeling_Dynamic_Systems\DynSys_and_DataSets\lorenz_attractor_dataset.csv"  # Pfad zur CSV-Datei
+    file_path = "/home_net/ge36xax/projects/Modeling_Dynamic_Systems/DynSys_and_DataSets/lorenz_attractor_dataset.csv"  # Pfad zur CSV-Datei
     batch_size = 32
     input_size = 3  # X, Y, Z (3 Features)
     hidden_size = 128
