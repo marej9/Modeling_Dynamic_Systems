@@ -76,6 +76,7 @@ class TimeSeriesDataset(Dataset):
 
         self.X, self.Y = [], []
        
+
         for i in range(len(data) - sequence_length - future_steps + 1):
             self.X.append(data[i:i+sequence_length])
             self.Y.append(data[i+sequence_length: i+sequence_length+future_steps])     
@@ -154,74 +155,103 @@ def load_model(model_path, input_size, hidden_size, num_layers, output_size):
     return model
 
 
-def evaluate(model, data, epochs, loss_fn, future_steps):
+def plot_all_features(model, file_path, start_point, future_steps, sequence_length):
+    """
+    Plots predictions vs. true values for all features in a single graph.
+    
+    Parameters:
+        model: Trained RNN model
+        dataloader: DataLoader object containing the test dataset
+        future_steps: Number of future steps to predict
+    """
+    model.eval()  # Set the model to evaluation mode
+    
+
+    # Drop the time column (assume it's not needed for the model)
+    data = pd.read_csv(file_path).iloc[1:, 1:].values  # Load X, Y, Z
+        
+    #convert to Pytorch tensor
+    data = torch.tensor(data,dtype=torch.float32)
+
+    #compute mean and standard deviation over features (columns)
+    mean = data.mean(dim=0)
+    std = data.std(dim=0)
+
+    # Apply normalization
+    data = (data - mean) / std
+    X, Y = [], []
+       
+    
+    X = data[start_point: start_point +sequence_length].unsqueeze(0).to(device)
+    Y = data[start_point + sequence_length: start_point +sequence_length+future_steps].unsqueeze(0).to(device)
+    # X.shape = batch_size, future_steps, num_features
+    
+    print(f"X shape of {X.shape}")
+
+
+    with torch.no_grad():
+        predictions = model(X, future_steps=future_steps)  # Predict future steps
+
+    # Shape: (sequence_length, num_features)
+    Y = Y.squeeze(0).cpu().numpy()  # Shape: (future_steps, num_features)
+    predictions = predictions.squeeze(0).cpu().numpy()  # Shape: (future_steps, num_features)
+    
+    print("True values shape:", Y.shape)
+    print("Predictions shape:", predictions.shape)
+    # Plot each feature
+    num_features = Y.shape[1]
+ 
+
+      # Plot predictions vs. true values for each feature
+    time_steps = np.arange(future_steps)
+    for feature_index in range(num_features):
+        plt.figure(figsize=(8, 4))
+        plt.plot(time_steps, Y[:, feature_index], label="True Values", marker="o")
+        plt.plot(time_steps, predictions[:, feature_index], label="Predictions", marker="x", linestyle="--")
+        plt.title(f"Feature {feature_index + 1}: Predictions vs True Values")
+        plt.xlabel("Future Time Steps")
+        plt.ylabel("Normalized Value")
+        plt.legend()
+        plt.grid()
+        plt.show()
+
+
+
+
+
+def evaluate(model, dataloader, loss_fn, future_steps):
+    """
+    Evaluates the model on the given dataloader and calculates the average loss.
+    
+    Parameters:
+        model: Trained RNN model
+        dataloader: DataLoader containing the evaluation dataset
+        loss_fn: Loss function (e.g., MSELoss)
+        future_steps: Number of future steps to predict
+        
+    Returns:
+        avg_loss: Average loss over the entire dataset
+    """
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     model.to(device)
-    model.train()
-    train_losses = {}
+    model.eval()  # Set model to evaluation mode
     
-    print("=> Starting evaluating")
+    print("=> Starting evaluation")
+    all_losses = []
 
-    all_losses = list()
-        
-    for X, Y in data:  # X, Y are batches
-        
+    with torch.no_grad():  # Disable gradient computation for evaluation
+        for X, Y in dataloader:  # Iterate over batches
+            X, Y = X.to(device), Y.to(device)
+            
+            predictions = model(X, future_steps=future_steps)
+            loss = loss_fn(predictions, Y)
+            all_losses.append(loss.item())
 
-        # Send tensors to the device
-        X, Y = X.to(device), Y.to(device)
-
-        # Clear gradients
-        
-
-        prediction = model(X, future_steps = future_steps)
-        loss = loss_fn(prediction, Y)
-        # prediction of shape (batch_size, future_steps, output_size=features)
-        # Y of shape (batch_size, future_steps, output_size=features)
-        
-        all_losses.append(loss.item())
+    avg_loss = np.mean(all_losses)  # Calculate the average loss
+    print(f"==> Average Loss: {avg_loss:.4f}")
+    return 
 
 
-        
-    # Store epoch loss
-    loss = np.mean(all_losses) # mean value for all batches in one epoch
-    print(f"==> loss:{loss}")
-
-
-def evaluate_and_plot(model, file_path, sequence_length, future_steps, start_index=0):
-    """data = pd.read_csv(file_path).iloc[1:, 1:].values  # Load data
-    data = torch.tensor(data, dtype=torch.float32)
-
-    # Normalize data
-    mean = data.mean(dim=0) 
-    std = data.std(dim=0) 
-    data = (data - mean) / std
-
-    # Get a sequence of data for prediction (choose a starting index)
-    input_seq = data[start_index:start_index+sequence_length].unsqueeze(0).to(device)
-    
-    # Predict future steps
-    with torch.no_grad():
-        predicted_output = model(input_seq, future_steps=future_steps)
-    
-    # Denormalize predictions
-    predicted_output = (predicted_output.squeeze(0) * std + mean).cpu()
-
-    # Get true values for comparison
-    target_seq = data[start_index+sequence_length:start_index+sequence_length+future_steps].cpu().numpy()
-    target_seq = target_seq * std + mean
-
-    # Plot results
-    plt.figure(figsize=(15, 10))
-    for i in range(predicted_output.shape[-1]):
-        plt.subplot(predicted_output.shape[-1], 1, i + 1)
-        plt.plot(predicted_output[:, i], label=f'Predicted Feature {i + 1}', linestyle='--')
-        plt.plot(target_seq[:, i], label=f'Actual Feature {i + 1}')
-        plt.xlabel('Time Steps')
-        plt.ylabel(f'Feature {i + 1}')
-        plt.legend()
-
-    plt.tight_layout()
-    plt.show()"""
 
 if __name__ == "__main__":
     # Hyperparameter
@@ -236,6 +266,17 @@ if __name__ == "__main__":
     output_size = 3
     learning_rate = 0.0001
     num_layers = 2
+    start_point=230
+
+    x = [1, 2, 3, 4, 5]
+    y = [1, 4, 9, 16, 25]
+
+    plt.plot(x, y)
+    plt.title("Beispiel Plot")
+    plt.xlabel("X-Achse")
+    plt.ylabel("Y-Achse")
+    plt.grid(True)
+    plt.show()
     """
     # DataLoader mit Sequenzlänge und Zukunftsschritten
     dataloader = create_dataloader(file_path, batch_size, sequence_length, future_steps)
@@ -251,8 +292,8 @@ if __name__ == "__main__":
     save_model(model, 'rnn_norm_model_future_steps.pth')
     print("training abgeschlossen")
     
-   """
-    
+    """
+    """  
     model_path = "rnn_norm_model_future_steps.pth"  # Pfad zu deinem Modell
     file_path = "lorenz_attractor_dataset_test.csv"  # Pfad zu deinem Test-Dataset
     sequence_length = 60  # Eingabelänge
@@ -262,8 +303,14 @@ if __name__ == "__main__":
     # Modell laden
     model = RNN(input_size, hidden_size, num_layers, output_size).to(device)
     model.load_state_dict(torch.load(model_path))
-    model.eval()  # Modell in den Evaluierungsmodus versetzen
     loss_fn = nn.MSELoss()
     # Evaluierung durchführen
     dataloader = create_dataloader(file_path, batch_size, sequence_length, future_steps)
-    avg_loss = evaluate(model, dataloader, epochs, loss_fn, future_steps=future_steps)
+    evaluate(model, dataloader, loss_fn, future_steps=future_steps)
+
+    """
+    model_path = "rnn_norm_model_future_steps.pth"  # Pfad zu deinem Modell
+    file_path = "lorenz_attractor_dataset_test.csv"  # Pfad zu deinem Test-Dataset
+    model = RNN(input_size, hidden_size, num_layers, output_size).to(device)
+    model.load_state_dict(torch.load(model_path, weights_only = True))
+    plot_all_features(model, file_path, start_point, future_steps, sequence_length)
