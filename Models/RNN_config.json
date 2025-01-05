@@ -1,0 +1,11 @@
+[
+    {
+        "system_name":"lorenz_system",
+        "training_dataset":"D:\\Master_EI\\FP\\Modeling_Dynamic_Systems\\lorenz_attractor_dataset.csv",
+        "validation_dataset":"D:\\Master_EI\\FP\\Modeling_Dynamic_Systems\\lorenz_attractor_dataset_test.csv",
+        "sequence_in":"[10,20,50,150,500,1000]",
+        "sequence_out" : "[10,20,50,150,500,1000]",
+        "start_end": "[1000, 1200]"
+    }
+
+]
