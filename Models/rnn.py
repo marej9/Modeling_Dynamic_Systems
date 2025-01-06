@@ -161,7 +161,7 @@ def load_model(model_path, input_size, hidden_size, num_layers, output_size):
     return model
 
 
-def plot_all_features(model, file_path, start_point, future_steps, sequence_length):
+def predict_sequence(model, file_path, start_point, future_steps, sequence_length):
     """
     Plots predictions vs. true values for all features in a single graph.
     
@@ -170,6 +170,7 @@ def plot_all_features(model, file_path, start_point, future_steps, sequence_leng
         dataloader: DataLoader object containing the test dataset
         future_steps: Number of future steps to predict
     """
+    
     model.eval()  # Set the model to evaluation mode
     
 
@@ -260,6 +261,8 @@ def evaluate(model, dataloader, loss_fn, future_steps):
 
 
 
+
+
 if __name__ == "__main__":
 
     
@@ -277,8 +280,6 @@ if __name__ == "__main__":
     output_size = config["output_size"]
     learning_rate = config["learning_rate"]
     num_layers = config["num_layers"]
-    start_point = config["start_point"]
-    end_point = config["end_point"]
 
     for system in config:
         training_dataset = Path(system["training_dataset"])
@@ -316,7 +317,7 @@ if __name__ == "__main__":
                     dataloader = create_dataloader(validation_dataset, batch_size, sequence_length, future_steps)
                     evaluation_loss = evaluate(model, dataloader, loss_fn, future_steps=future_steps)
 
-                    training["evaluation_loss"] = training_time
+                    training["evaluation_loss"] = evaluation_loss
 
                     training_results.append(training)
 
@@ -373,5 +374,5 @@ if __name__ == "__main__":
     file_path = os.path.join( os.getcwd() ,"lorenz_attractor_dataset_test.csv")  # Pfad zu deinem Test-Dataset
     model = RNN(input_size, hidden_size, num_layers, output_size).to(device)
     model.load_state_dict(torch.load(model_path, map_location = torch.device("cpu") , weights_only = True))
-    plot_all_features(model, file_path, start_point, future_steps, sequence_length) 
+    predict_sequence(model, file_path, start_point, future_steps, sequence_length) 
     
