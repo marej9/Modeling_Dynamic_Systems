@@ -55,12 +55,12 @@ class RNN(nn.Module):
 
 # Custom Dataset Class
 class TimeSeriesDataset(Dataset):
-    def __init__(self, file_path, sequence_length, future_steps):
+    def __init__(self, data_set, sequence_length, future_steps):
         """
         Prepares data for sequence-based training with future steps targets
         """
         
-        # Drop the time column (assume it's not needed for the model)
+        """        # Drop the time column (assume it's not needed for the model)
         data = pd.read_csv(file_path).iloc[1:, 1:].values  # Load X, Y, Z
         
         #convert to Pytorch tensor
@@ -71,18 +71,21 @@ class TimeSeriesDataset(Dataset):
         std = data.std(dim=0)
 
          # Apply normalization
-        data = (data - mean) / std
+        data = (data - mean) / std"""
         
 
+        """   
         self.sequence_length = sequence_length
         self.future_steps = future_steps
+        """
+        
 
         self.X, self.Y = [], []
        
 
-        for i in range(len(data) - sequence_length - future_steps + 1):
-            self.X.append(data[i:i+sequence_length])
-            self.Y.append(data[i+sequence_length: i+sequence_length+future_steps])     
+        for i in range(len(data_set) - sequence_length - future_steps + 1):
+            self.X.append(data_set[i:i+sequence_length])
+            self.Y.append(data_set[i+sequence_length: i+sequence_length+future_steps])     
 
         # Create inputs (X) and targets (Y)
         self.X = torch.stack(self.X)  # All rows except the last
@@ -103,6 +106,30 @@ def create_dataloader(file_path, batch_size, sequence_length, future_steps, shuf
     dataset = TimeSeriesDataset(file_path, sequence_length, future_steps)
 
     return DataLoader(dataset, batch_size=batch_size, shuffle=shuffle, drop_last=True)
+
+
+def split_and_normalize_dataset(file_path, train_ratio=0.7):
+
+    data = pd.read_csv(file_path).iloc[1:, 1:].values
+    data = torch.tensor(data, dtype=torch.float32)
+
+    dataset_size = len(data) 
+    train_size = int(train_ratio * dataset_size)
+    test_size = dataset_size - train_size
+
+    train_data = data[:train_size ]
+    test_data = data[train_size:]
+
+    #compute mean and standard deviation over features (columns)
+    train_mean = train_data.mean(dim=0)
+    train_std = train_data.std(dim=0)
+
+    # Apply normalization
+    normalized_train_data = (train_data - train_mean) / train_std
+    normalized_test_data = (test_data - train_mean) / train_std
+
+
+    return normalized_train_data, normalized_test_data
 
 
 # Train Function
@@ -150,15 +177,6 @@ def train(model, data, epochs, optimizer, loss_fn, future_steps):
 
     return losses_train
 
-"""def save_model(model, file_name):
-    torch.save(model.state_dict(), file_name)
-    print(f"Model saved to {file_name}")"""
-
-def load_model(model_path, input_size, hidden_size, num_layers, output_size):
-    model = RNN(input_size, hidden_size, num_layers, output_size).to(device)
-    model.load_state_dict(torch.load(model_path))
-    model.eval()
-    return model
 
 
 def predict_sequence(model, file_path, start_point, future_steps, sequence_length):
@@ -260,87 +278,68 @@ def evaluate(model, dataloader, loss_fn, future_steps):
     return  avg_loss
 
 
+def plot_prediction(model, dataloader, future_steps):
+    """
+    Plots the true values and predictions for one iteration.
 
+    Parameters:
+    model: Trained RNN model
+    dataloader: DataLoader containing the evaluation dataset
+    future_steps: Number of future steps to predict
+    """
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    model.to(device)
+    model.eval()  # Set model to evaluation mode
+    
+    with torch.no_grad():  # Disable gradient computation for evaluation
+        for X, Y in dataloader:  # Iterate over batches
+            X, Y = X.to(device), Y.to(device)
+            
+            predictions = model(X, future_steps=future_steps)
+            
+            # Plot the first batch
+            true_values = Y[0].cpu().numpy()  # Shape: (future_steps, num_features)
+            predicted_values = predictions[0].cpu().numpy()  # Shape: (future_steps, num_features)
+            
+            time_steps = np.arange(future_steps)
+            features = ['X', 'Y', 'Z']
+            
+            plt.figure(figsize=(12, 6))
+            for i in range(true_values.shape[1]):
+                plt.subplot(1, 3, i + 1)
+                plt.plot(time_steps, true_values[:, i], label='True Values', marker='o')
+                plt.plot(time_steps, predicted_values[:, i], label='Predictions', marker='x', linestyle='--')
+                plt.title(f'Feature {features[i]}: Predictions vs True Values')
+                plt.xlabel('Future Time Steps')
+                plt.ylabel('Normalized Value')
+                plt.legend()
+                plt.grid()
+            
+            plt.tight_layout()
+            plt.show()
 
 
 if __name__ == "__main__":
 
     
-    # lies confin ein
-    config_path = os.path.join( os.getcwd() ,"RNN_config.json")
-
-    with open(config_path, 'r') as file:
-        config = json.load(file)
-
-    # Hyperparameter
-    batch_size = config["batch_size"]
-    epochs = config["epochs"]
-    hidden_size = config["hidden_size"]
-    input_size = config["input_size"]
-    output_size = config["output_size"]
-    learning_rate = config["learning_rate"]
-    num_layers = config["num_layers"]
-
-    for system in config:
-        training_dataset = Path(system["training_dataset"])
-        validation_dataset = Path(system["validation_dataset"])
-        result_file = os.path.join(os.getcwd(), system["system_name"])
-        training_results = list()
-        training_results.append(system)
-
-        for sequence_length in system["sequence_length"]:
-            
-            for future_steps in system["sequence_out"]:
-                    training = dict()
-                    training["sequence_length"] = sequence_length
-                    training["future_steps"] = future_steps
-
-
-                    # DataLoader mit Sequenzlänge und Zukunftsschritten
-                    dataloader = create_dataloader(training_dataset, batch_size, sequence_length, future_steps)
-
-                    # Modell initialisieren
-                    model = RNN(input_size=input_size, hidden_size=hidden_size, num_layers=2, num_classes=output_size).to(device)
-                    optimizer = optim.Adam(model.parameters(), lr=learning_rate)
-                    loss_fn = nn.MSELoss()
-
-                    # Training
-                    start_training_time = datetime.now().time()
-                    training_losses = train(model, dataloader, epochs, optimizer, loss_fn, future_steps=future_steps)  
-                    training_time = datetime.now().time() - start_training_time      
-                    print("training abgeschlossen")
-                    training["training_losses"] = training_losses
-                    training["training_time"] = training_time
-
-
-                    # Evaluierung durchführen
-                    dataloader = create_dataloader(validation_dataset, batch_size, sequence_length, future_steps)
-                    evaluation_loss = evaluate(model, dataloader, loss_fn, future_steps=future_steps)
-
-                    training["evaluation_loss"] = evaluation_loss
-
-                    training_results.append(training)
-
-        
-
-
- 
-
-
-    """
     # Hyperparameter
     sequence_length = 60  # Eingabelänge (Anzahl Zeitpunkte)
     future_steps = 10     # Anzahl der vorherzusagenden Schritte
     batch_size = 256
-    epochs = 500
+    epochs = 20
     hidden_size = 80
     input_size = 3
     output_size = 3
     learning_rate = 0.0001
     num_layers = 2
     start_point=230
+
+    dataset_path = "D:\Master_EI\FP\Modeling_Dynamic_Systems\lorenz_attractor_dataset.csv"
+    #split dataset 
+    training_dataset, test_dataset = split_and_normalize_dataset(dataset_path, 0.7)
+
     # DataLoader mit Sequenzlänge und Zukunftsschritten
-    dataloader = create_dataloader(file_path, batch_size, sequence_length, future_steps)
+    dataloader = create_dataloader(training_dataset, batch_size, sequence_length, future_steps)
 
     # Modell initialisieren
     model = RNN(input_size=input_size, hidden_size=hidden_size, num_layers=2, num_classes=output_size).to(device)
@@ -349,30 +348,21 @@ if __name__ == "__main__":
 
 
     # Training
-    train_losses = train(model, dataloader, epochs, optimizer, loss_fn, future_steps=future_steps)
-    save_model(model, 'rnn_norm_model_future_steps.pth')
+    training_losses = train(model, dataloader, epochs, optimizer, loss_fn, future_steps=future_steps) 
+    
     print("training abgeschlossen")
     
-    """
-    """  
-    model_path = "rnn_norm_model_future_steps.pth"  # Pfad zu deinem Modell
-    file_path = "lorenz_attractor_dataset_test.csv"  # Pfad zu deinem Test-Dataset
-    sequence_length = 60  # Eingabelänge
-    future_steps = 10     # Anzahl der vorherzusagenden Schritte
-    batch_size = 1        # Batchgröße (für Evaluation irrelevant, da nur eine Sequenz gleichzeitig verarbeitet wird)
+    # Test
+    dataloader = create_dataloader(test_dataset, batch_size, sequence_length, future_steps)
+    
+    evaluation_loss = evaluate(model, dataloader, loss_fn, future_steps=future_steps)
 
-    # Modell laden
-    model = RNN(input_size, hidden_size, num_layers, output_size).to(device)
-    model.load_state_dict(torch.load(model_path))
-    loss_fn = nn.MSELoss()
-    # Evaluierung durchführen
-    dataloader = create_dataloader(file_path, batch_size, sequence_length, future_steps)
-    evaluate(model, dataloader, loss_fn, future_steps=future_steps)
+    print(evaluation_loss)
 
-    """
-    model_path = os.path.join( os.getcwd() ,"rnn_norm_model_future_steps.pth")  # Pfad zu deinem Modell
-    file_path = os.path.join( os.getcwd() ,"lorenz_attractor_dataset_test.csv")  # Pfad zu deinem Test-Dataset
-    model = RNN(input_size, hidden_size, num_layers, output_size).to(device)
-    model.load_state_dict(torch.load(model_path, map_location = torch.device("cpu") , weights_only = True))
-    predict_sequence(model, file_path, start_point, future_steps, sequence_length) 
+    plot_prediction(model, dataloader, future_steps)
+
+    
+
+
+
     

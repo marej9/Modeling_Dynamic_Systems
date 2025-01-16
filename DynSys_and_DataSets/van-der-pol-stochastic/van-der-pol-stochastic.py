@@ -1,17 +1,18 @@
 import numpy as np
 import pandas as pd
 import matplotlib.pyplot as plt
+import os
 
-# Parameter für den Limit Cycle
-params_limit_cycle_ct_ubox = (0.5, 0.3)  # (p_a, p_b)
+# Parameter für den Van-der-Pol-Oszillator
+params_van_der_pol_optimal_construction = (2, 2, 5, 0.8)  # (p_a, p_mu, p_b, p_c)
 
-def make_2d_ct_limit_cycle(p_a, p_b):
+def make_2d_ct_van_der_pol(p_a, p_mu, p_b, p_c):
     def _contfcn(x):
         x0 = x[:, 0]
         x1 = x[:, 1]
-        # Dynamik des Systems
-        y0 = -p_a * x1 + x0 * (p_b - x0**2 - x1**2)
-        y1 = p_a * x0 + x1 * (p_b - x0**2 - x1**2)
+        # Dynamik des Van-der-Pol-Oszillators
+        y0 = p_a * x1
+        y1 = p_mu * x1 * (1. - p_b * x0**2) - p_c * x0
         return np.stack([y0, y1], axis=1)
     return _contfcn
 
@@ -21,13 +22,14 @@ def simulate(fcn, x0, timesteps, dt):
     x = x0
     for step in range(timesteps):
         dx = fcn(np.array([x]))[0]  # Dynamik für aktuellen Zustand
-        x = x + dx * dt
+        noise = np.random.normal(0, 0.01, size=x.shape) 
+        x = x + dx * dt + noise #add gaussian noise
         trajectory.append(x)
     return np.array(trajectory)
 
 # Hyperparameter
 initial_state = [1.0, 1.0]  # Startzustand im Phasenraum (x0, x1)
-simulation_time = 100        # Gesamtdauer der Simulation in Sekunden
+simulation_time = 1000        # Gesamtdauer der Simulation in Sekunden
 time_steps = 20000          # Anzahl der Zeitschritte
 t = np.linspace(0, simulation_time, time_steps)  # Zeitgitter für Integration
 dt = t[1] - t[0]            # Zeitschrittgröße berechnen
@@ -35,11 +37,11 @@ dt = t[1] - t[0]            # Zeitschrittgröße berechnen
 print(f"Zeitschrittgröße: {dt:.6f} Sekunden")
 
 # Parameter und Funktion erstellen
-p_a, p_b = params_limit_cycle_ct_ubox
-limit_cycle_fcn = make_2d_ct_limit_cycle(p_a, p_b)
+p_a, p_mu, p_b, p_c = params_van_der_pol_optimal_construction
+van_der_pol_fcn = make_2d_ct_van_der_pol(p_a, p_mu, p_b, p_c)
 
 # Simulation mit den neuen Parametern
-trajectory = simulate(limit_cycle_fcn, np.array(initial_state), len(t) - 1, dt)
+trajectory = simulate(van_der_pol_fcn, np.array(initial_state), len(t) - 1, dt)
 
 # CSV-Export
 data = np.hstack([t.reshape(-1, 1), trajectory])   # Zeit und Zustände kombinieren
@@ -47,14 +49,14 @@ columns = ["Time", "x0", "x1"]
 df = pd.DataFrame(data, columns=columns)
 
 # Speichern in CSV
-csv_file = "limit_cycle_data.csv"
+csv_file = os.path.join(os.path.dirname(os.path.abspath(__file__)), "van_der_pol_stochastic_data_5.csv")
 df.to_csv(csv_file, index=False)
 print(f"Datensatz wurde als '{csv_file}' gespeichert.")
 
 # Plot der Trajektorie
 plt.figure(figsize=(6, 6))
-plt.plot(trajectory[:, 0], trajectory[:, 1], label="Limit Cycle")
-plt.title("Canonical Limit Cycle")
+plt.plot(trajectory[:, 0], trajectory[:, 1], label="Van der Pol Oscillator")
+plt.title("Van der Pol Oscillator - Phase Space")
 plt.xlabel("x0")
 plt.ylabel("x1")
 plt.axis('equal')
