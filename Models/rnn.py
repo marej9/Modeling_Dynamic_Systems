@@ -139,43 +139,38 @@ def train(model, data, epochs, optimizer, loss_fn, future_steps):
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     model.to(device)
     model.train()
-    train_losses = {}
-    losses_train = list()
+
 
     print("=> Starting training")
 
-    for epoch in range(epochs):
+
+    
+    for X, Y in data:  # X, Y are batches
         
-        epoch_losses = list()
+
+        # Send tensors to the device
+        X, Y = X.to(device), Y.to(device)
+
+        # Clear gradients
+        optimizer.zero_grad()
+
+        prediction = model(X, future_steps = future_steps)
+        loss = loss_fn(prediction, Y)
+        # prediction of shape (batch_size, future_steps, output_size=features)
+        # Y of shape (batch_size, future_steps, output_size=features)
         
-        for X, Y in data:  # X, Y are batches
-            
 
-            # Send tensors to the device
-            X, Y = X.to(device), Y.to(device)
+        loss.backward()
+        optimizer.step()
 
-            # Clear gradients
-            optimizer.zero_grad()
+        epoch_losses.append(loss.item())
 
-            prediction = model(X, future_steps = future_steps)
-            loss = loss_fn(prediction, Y)
-            # prediction of shape (batch_size, future_steps, output_size=features)
-            # Y of shape (batch_size, future_steps, output_size=features)
-           
+        
+    # Store epoch loss
+    train_loss = np.mean(epoch_losses) # mean value for all batches in one epoch
+    return train_loss
+        
 
-            loss.backward()
-            optimizer.step()
-
-            epoch_losses.append(loss.item())
-
-            
-        # Store epoch loss
-        train_losses[epoch] = np.mean(epoch_losses) # mean value for all batches in one epoch
-        if (epoch +1) % 10 == 0: 
-            print(f"=> Epoch: {epoch + 1}/{epochs}, Loss: {train_losses[epoch]:.4f}") 
-            losses_train.append(train_losses[epoch])
-
-    return losses_train
 
 
 
@@ -333,29 +328,54 @@ if __name__ == "__main__":
     learning_rate = 0.0001
     num_layers = 2
     start_point=230
+   
+
+    
 
     dataset_path = "D:\Master_EI\FP\Modeling_Dynamic_Systems\lorenz_attractor_dataset.csv"
     #split dataset 
     training_dataset, test_dataset = split_and_normalize_dataset(dataset_path, 0.7)
 
     # DataLoader mit Sequenzlänge und Zukunftsschritten
-    dataloader = create_dataloader(training_dataset, batch_size, sequence_length, future_steps)
-
+    dataloader_training = create_dataloader(training_dataset, batch_size, sequence_length, future_steps)
+    dataloader_evaluate = create_dataloader(test_dataset, batch_size, sequence_length, future_steps)
     # Modell initialisieren
     model = RNN(input_size=input_size, hidden_size=hidden_size, num_layers=2, num_classes=output_size).to(device)
     optimizer = optim.Adam(model.parameters(), lr=learning_rate)
     loss_fn = nn.MSELoss()
 
+    val_losses=list()
+    epoch_losses = list()
+    best_loss = float("inf")
+    patience = 10
 
-    # Training
-    training_losses = train(model, dataloader, epochs, optimizer, loss_fn, future_steps=future_steps) 
-    
+    for epoch in range(epochs):
+        
+
+        # Training
+        training_loss = train(model, dataloader_training, optimizer, loss_fn, future_steps=future_steps) 
+
+        epoch_losses.append(training_loss)
+
+           
+        val_loss = evaluate(model, dataloader_evaluate, loss_fn, future_steps=future_steps)   
+        if (epoch +1) % 10 == 0: 
+            print(f"=> Epoch: {epoch + 1}/{epochs}, Training_loss: {training_loss:.6f}, val_loss: {val_loss:.6f}") 
+        if val_loss < best_loss:
+            best_loss = val_loss    
+            patience = 10  # Reset patience counter
+        else:
+            patience -= 1
+            if patience == 0:
+                break
+
+
     print("training abgeschlossen")
     
     # Test
-    dataloader = create_dataloader(test_dataset, batch_size, sequence_length, future_steps)
     
-    evaluation_loss = evaluate(model, dataloader, loss_fn, future_steps=future_steps)
+    
+    
 
     print(evaluation_loss)
 
