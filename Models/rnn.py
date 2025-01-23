@@ -140,6 +140,7 @@ def train(model, data, epochs, optimizer, loss_fn, future_steps):
     model.to(device)
     model.train()
 
+    batch_losses=list()
 
     print("=> Starting training")
 
@@ -163,11 +164,11 @@ def train(model, data, epochs, optimizer, loss_fn, future_steps):
         loss.backward()
         optimizer.step()
 
-        epoch_losses.append(loss.item())
+        batch_losses.append(loss.item())
 
         
     # Store epoch loss
-    train_loss = np.mean(epoch_losses) # mean value for all batches in one epoch
+    train_loss = np.mean(batch_losses) # mean value for all batches in one epoch
     return train_loss
         
 
@@ -314,6 +315,68 @@ def plot_prediction(model, dataloader, future_steps):
             plt.show()
 
 
+def full_training(sys, dataset_path, sequence_length, future_steps):
+    
+    batch_size = sys["batch_size"]
+    epochs = sys["epochs"]
+    hidden_size = sys["hidden_size"]
+    input_size = sys["input_size"]
+    output_size = sys["output_size"]
+    learning_rate = sys["learning_rate"]
+    num_layers = sys["num_layers"]
+    patience = system["patience"]
+    val_losses=list()
+    training_losses = list()
+    best_loss = float("inf")
+    patience_start = patience
+    #split dataset 
+    
+    training_dataset, test_dataset = split_and_normalize_dataset(dataset_path, 0.7)
+
+    # DataLoader mit Sequenzlänge und Zukunftsschritten
+    dataloader_training = create_dataloader(training_dataset, batch_size, sequence_length, future_steps)
+    dataloader_evaluate = create_dataloader(test_dataset, batch_size, sequence_length, future_steps)
+    # Modell initialisieren
+    model = RNN(input_size=input_size, hidden_size=hidden_size, num_layers=num_layers, num_classes=output_size).to(device)
+    optimizer = optim.Adam(model.parameters(), lr=learning_rate)
+    loss_fn = nn.MSELoss()
+
+
+    start_training_time = datetime.now()
+
+    for epoch in range(epochs):
+        
+        # Training
+        training_loss = train(model, dataloader_training, optimizer, loss_fn, future_steps=future_steps) 
+        training_losses.append(training_loss)
+        #evaluation   
+        val_loss = evaluate(model, dataloader_evaluate, loss_fn, future_steps=future_steps)   
+        val_losses.append(val_loss)
+
+        if (epoch +1) % 10 == 0: 
+            print(f"=> Epoch: {epoch + 1}/{epochs}, Training_loss: {training_loss:.6f}, val_loss: {val_loss:.6f}") 
+
+        if val_loss < best_loss:
+            best_loss = val_loss    
+            patience = patience_start  # Reset patience counter
+
+        else:
+            patience -= 1
+            if patience == 0:   
+
+                best_training_loss = training_losses[-start_point]
+                best_val_loss = val_losses[-start_point]
+                training_time = datetime.now() - start_training_time
+                return best_training_loss, best_val_loss, training_time
+            
+    best_training_loss = training_losses[-1]
+    best_val_loss = val_losses[-1]
+    training_time = datetime.now() - start_training_time
+    return  best_training_loss, best_val_loss, training_time
+
+    
+
+
 if __name__ == "__main__":
 
     
@@ -333,53 +396,65 @@ if __name__ == "__main__":
     
 
     dataset_path = "D:\Master_EI\FP\Modeling_Dynamic_Systems\lorenz_attractor_dataset.csv"
-    #split dataset 
-    training_dataset, test_dataset = split_and_normalize_dataset(dataset_path, 0.7)
+    
 
-    # DataLoader mit Sequenzlänge und Zukunftsschritten
-    dataloader_training = create_dataloader(training_dataset, batch_size, sequence_length, future_steps)
-    dataloader_evaluate = create_dataloader(test_dataset, batch_size, sequence_length, future_steps)
-    # Modell initialisieren
-    model = RNN(input_size=input_size, hidden_size=hidden_size, num_layers=2, num_classes=output_size).to(device)
-    optimizer = optim.Adam(model.parameters(), lr=learning_rate)
-    loss_fn = nn.MSELoss()
+    # lies confin ein
+    config_path = os.path.join( os.getcwd(),"RNN_config.json")
 
-    val_losses=list()
-    epoch_losses = list()
-    best_loss = float("inf")
-    patience = 10
+    with open(config_path, 'r') as file:
+        config = json.load(file)
 
-    for epoch in range(epochs):
+    # Hyperparameter
+
+    for system in config:
+
+
+        dataset = Path(system["dataset"])
+        
+        
+        result_file = os.path.join(os.getcwd(), system["system_name"])
+
+        
+        training_results.append(system)
+        all_sets_results= list()
+
+        for set in dataset:
+            
+            one_set_results = list()
+
+            if not set.endswith('.csv'):
+                continue
+            
+            for sequence_len, future_len in zip(system["sequence_length"],system["sequence_out"]):
+
+                training_results = dict()
+
+                trainig_res, val_res, train_time = full_training(system, set, sequence_len, future_len)
+
+                training_results["sequence_len"] = sequence_len
+                training_results["future_len"] = future_len
+                training_results["trainig_res"] = trainig_res
+                training_results["val_res"] = val_res
+                training_results["train_time"] = train_time
+
+                one_set_results.append(training_results)
+
+            all_sets_results.append(one_set_results)
+
+        training_results.append(all_sets_results)
+            
+        with open(result_file, 'w') as json_file:
+            json.dump(training_results, json_file)
+                
         
 
-        # Training
-        training_loss = train(model, dataloader_training, optimizer, loss_fn, future_steps=future_steps) 
-
-        epoch_losses.append(training_loss)
-
-           
-        val_loss = evaluate(model, dataloader_evaluate, loss_fn, future_steps=future_steps)   
-        if (epoch +1) % 10 == 0: 
-            print(f"=> Epoch: {epoch + 1}/{epochs}, Training_loss: {training_loss:.6f}, val_loss: {val_loss:.6f}") 
-        if val_loss < best_loss:
-            best_loss = val_loss    
-            patience = 10  # Reset patience counter
-        else:
-            patience -= 1
-            if patience == 0:
-                break
 
 
-    print("training abgeschlossen")
-    
-    # Test
-    
-    
+
+
     
 
-    print(evaluation_loss)
 
-    plot_prediction(model, dataloader, future_steps)
 
     
 
