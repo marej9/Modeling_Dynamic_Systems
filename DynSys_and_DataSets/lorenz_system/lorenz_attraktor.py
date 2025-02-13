@@ -19,8 +19,17 @@ def lorenz_deriv(state, t, sigma, rho, beta):
     return [dx_dt, dy_dt, dz_dt]
 
 # Initial conditions and time span
-initial_state = [0.001, 0.001, 0.001]  # Starting point in phase space
-t = np.linspace(0, 100, 20000)    # Time grid for integration
+initial_state = [0.1, 0.1, 0.1]  # Starting point in phase space
+# t = np.linspace(0, 100, 20000)    # Time grid for integration
+
+# Define the period and sampling rate
+period = 1.0  # Characteristic period of the Lorenz system (example value)
+sampling_rate = 12  # Number of points per period
+
+# Calculate the total number of points and time grid for integration
+total_time = 1000  # Total time for simulation
+num_points = int(total_time * sampling_rate / period)
+t = np.linspace(0, total_time, num_points)  # Time grid for integration
 
 # Numerical integration of the Lorenz equations
 trajectory = odeint(lorenz_deriv, initial_state, t, args=(sigma, rho, beta))

@@ -398,6 +398,7 @@ if __name__ == "__main__":
     dataset_path = "D:\Master_EI\FP\Modeling_Dynamic_Systems\lorenz_attractor_dataset.csv"
     
 
+
     # lies confin ein
     config_path = os.path.join( os.getcwd(),"RNN_config.json")
 

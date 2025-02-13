@@ -87,11 +87,14 @@ class MultiheadAttention(nn.Module):
             mask = expand_mask(mask)
         # Projects the input tensor x into a combined query, key, and value tensor using the qkv_proj linear layer.
         qkv = self.qkv_proj(x)
+        
         qkv = qkv.reshape(batch_size, seq_length, self.num_heads, 3*self.head_dim)
+        
         # Permutes the dimensions to [batch_size, num_heads, seq_length, 3*head_dim] to facilitate splitting into Q, K, and V.
         qkv = qkv.permute(0, 2, 1, 3)
         # Splits the combined tensor into three separate tensors: query (q), key (k), and value (v), each with shape [batch_size, num_heads, seq_length, head_dim].
         q, k, v = qkv.chunk(3, dim=-1)
+        
         values, attention = scaled_dot_product(q, k, v, mask=mask)
         # Permutes the dimensions of the values tensor to [batch_size, seq_length, num_heads, head_dim]
         values = values.permute(0, 2, 1, 3)
@@ -99,6 +102,7 @@ class MultiheadAttention(nn.Module):
         values = values.reshape(batch_size, seq_length, self.embed_dim)
         # Projects the concatenated values tensor back to the original embedding dimension using the o_proj linear layer.
         o = self.o_proj(values)
+        
         if return_attention:
             return o, attention
         else:
@@ -142,7 +146,6 @@ class EncoderBlock(nn.Module):
         linear_out = self.linear_net(x)
         x = x + self.dropout(linear_out)
         x = self.norm2(x)
-
         return x
     
         
@@ -164,6 +167,7 @@ class TransformerEncoder(nn.Module):
             attention_maps.append(attn_map)
             x = l(x)
         return attention_maps
+    
     
 
 # Define the PositionalEncoding class
@@ -204,25 +208,51 @@ class CosineWarmupScheduler(optim.lr_scheduler._LRScheduler):
             lr_factor *= epoch * 1.0 / self.warmup
         return lr_factor
     
-    # Define the TransformerPredictor class
+# Define the TransformerPredictor class
 class TransformerPredictor(nn.Module):
-    def __init__(self, input_dim, embed_dim, num_heads, dim_feedforward, num_layers, dropout=0.1):
+    def __init__(self, input_dim, model_dim, num_heads, dim_feedforward, num_layers, dropout=0.1, input_dropout=0.1):
         super().__init__()
-        self.pos_encoder = PositionalEncoding(input_dim)
-        self.encoder = TransformerEncoder(
-            num_layers=num_layers,
-            input_dim=input_dim,
-            embed_dim=embed_dim,
-            num_heads=num_heads,
-            dim_feedforward=dim_feedforward,
-            dropout=dropout
-        )
-        self.fc_out = nn.Linear(input_dim, input_dim)
+        self.input_dim = input_dim
+        self.model_dim = model_dim
+        self.num_heads = num_heads
+        self.dim_feedforward = dim_feedforward
+        self.num_layers = num_layers
+        self.dropout = dropout
+        self.input_dropout = input_dropout
+        self._create_model()
 
-    def forward(self, x, future_steps):
-        x = self.pos_encoder(x)
-        x = self.encoder(x)
-        x = self.fc_out(x)
+    def _create_model(self):
+        # Input dim -> Model dim
+        self.input_net = nn.Sequential(
+            nn.Dropout(self.input_dropout),
+            nn.Linear(self.input_dim, self.model_dim)
+        )
+        # Positional encoding for sequences
+        self.positional_encoding = PositionalEncoding(d_model=self.model_dim)
+        # Transformer
+        self.transformer = TransformerEncoder(
+            num_layers=self.num_layers,
+            input_dim=self.model_dim,
+            embed_dim=self.model_dim,
+            num_heads=self.num_heads,
+            dim_feedforward=2*self.model_dim,
+            dropout=self.dropout
+        )
+        # Output classifier per sequence element
+        self.output_net = nn.Sequential(
+            nn.Linear(self.model_dim, self.model_dim),
+            nn.LayerNorm(self.model_dim),
+            nn.ReLU(inplace=True),
+            nn.Dropout(self.dropout),
+            nn.Linear(self.model_dim, self.input_dim)
+        )
+
+    def forward(self, x, mask=None, add_positional_encoding=True):
+        x = self.input_net(x)
+        if add_positional_encoding:
+            x = self.positional_encoding(x)
+        x = self.transformer(x, mask=mask)
+        x = self.output_net(x)
         return x
     
 
@@ -303,7 +333,7 @@ def split_and_normalize_dataset(file_path, train_ratio=0.7):
     return normalized_train_data, normalized_val_data
 
 # Train Function
-def train(model, data, optimizer, loss_fn, future_steps):
+def train(model, data, optimizer, loss_fn):
 
     device = "mps"
     model.to(device)
@@ -320,7 +350,7 @@ def train(model, data, optimizer, loss_fn, future_steps):
         # Clear gradients
         optimizer.zero_grad()
 
-        prediction = model(X, future_steps = future_steps)
+        prediction = model(X)
         loss = loss_fn(prediction, Y)
         # prediction of shape (batch_size, future_steps, output_size=features)
         # Y of shape (batch_size, future_steps, output_size=features)        
@@ -334,7 +364,7 @@ def train(model, data, optimizer, loss_fn, future_steps):
     return train_loss
 
 
-def evaluate(model, dataloader, loss_fn, future_steps):
+def evaluate(model, dataloader, loss_fn):
     """
     Evaluates the model on the given dataloader and calculates the average loss.
     
@@ -357,7 +387,7 @@ def evaluate(model, dataloader, loss_fn, future_steps):
         for X, Y in dataloader:  # Iterate over batches
             X, Y = X.to(device), Y.to(device)
             
-            predictions = model(X, future_steps=future_steps)
+            predictions = model(X)
             loss = loss_fn(predictions, Y)
             all_losses.append(loss.item())
 
@@ -366,20 +396,85 @@ def evaluate(model, dataloader, loss_fn, future_steps):
 
     return  val_loss
 
+def plot_predictions(model, data, sequence_length, future_steps):
+    device = torch.device("mps" if torch.backends.mps.is_available() else "cpu")
+    model.to(device)
+    
+    model.eval()  # Set model to evaluation mode
+
+    # Select a random starting point for the sequence
+    start_idx = 100
+    input_sequence = data[start_idx:start_idx + sequence_length].unsqueeze(0).to(device)  # Add batch dimension
 
 
-    # Main script
+    # Get the actual future steps
+    actual_future = data[start_idx + sequence_length:start_idx + sequence_length + future_steps].to(device)
+
+    # Predict future steps
+    with torch.no_grad():
+        predicted_future = model(input_sequence).squeeze(0)  # Remove batch dimension
+
+    
+    # Convert tensors to lists for plotting
+    actual_future = actual_future.cpu().tolist()
+    predicted_future = predicted_future.cpu().tolist()
+    
+    # Plot the results in 2D
+    time_steps = list(range(future_steps))
+    plt.figure(figsize=(12, 6))
+
+    # Plot x
+    plt.subplot(3, 1, 1)
+    plt.plot(time_steps, [x[0] for x in actual_future], label='Actual Future')
+    plt.plot(time_steps, [x[0] for x in predicted_future], label='Predicted Future')
+    plt.title('X')
+    plt.legend()
+
+    # Plot y
+    plt.subplot(3, 1, 2)
+    plt.plot(time_steps, [x[1] for x in actual_future], label='Actual Future')
+    plt.plot(time_steps, [x[1] for x in predicted_future], label='Predicted Future')
+    plt.title('Y')
+    plt.legend()
+
+    # Plot z
+    plt.subplot(3, 1, 3)
+    plt.plot(time_steps, [x[2] for x in actual_future], label='Actual Future')
+    plt.plot(time_steps, [x[2] for x in predicted_future], label='Predicted Future')
+    plt.title('Z')
+    plt.legend()
+
+    plt.tight_layout()
+    plt.show()
+
+    # Plot the results in 3D
+    fig = plt.figure(figsize=(10, 8))
+    ax = fig.add_subplot(111, projection='3d')
+
+    ax.plot([x[0] for x in actual_future], [x[1] for x in actual_future], [x[2] for x in actual_future], label='Actual Future', color='b')
+    ax.plot([x[0] for x in predicted_future], [x[1] for x in predicted_future], [x[2] for x in predicted_future], label='Predicted Future', color='r', linestyle='--')
+
+    ax.set_xlabel('X')
+    ax.set_ylabel('Y')
+    ax.set_zlabel('Z')
+    ax.set_title('3D Plot of Actual vs Predicted Future Steps')
+    ax.legend()
+
+    plt.show()
+
+
 if __name__ == "__main__":
     # Define hyperparameters
-    batch_size = 64
+    batch_size = 128
     sequence_length = 20
     epochs = 500
     input_dim = 3  # Number of features
-    embed_dim = input_dim
-    num_heads = 1
+    model_dim = 128  # Hidden dimensionality inside the Transformer
+    num_heads = 4
     dim_feedforward = 64
-    num_layers = 3
-    dropout = 0.1
+    num_layers = 2
+    dropout = 0.0
+    input_dropout = 0.0
     future_steps = 20
 
     # Load and preprocess data
@@ -391,44 +486,41 @@ if __name__ == "__main__":
     test_loader = create_dataloader(test_data, batch_size, sequence_length, shuffle=False)
 
     # Initialize the model
-    model = TransformerPredictor(input_dim, embed_dim, num_heads, dim_feedforward, num_layers, dropout)
+    model = TransformerPredictor(input_dim, model_dim, num_heads, dim_feedforward, num_layers, dropout, input_dropout)
 
-    # Initialize the optimizer with CosineWarmupScheduler
+    # Initialize the optimizer
     optimizer = optim.Adam(model.parameters(), lr=0.001)
-    scheduler = CosineWarmupScheduler(optimizer, warmup=10, max_iters=epochs)
 
     # Loss function
     loss_fn = nn.MSELoss()
 
     patience_start = 50
     start_point = patience_start
-    training_losses = list()
-    val_losses = list()
+    training_losses = []
+    val_losses = []
     best_loss = float("inf")
 
     for epoch in range(epochs):
         # Train the model
-        train_results = train(model, train_loader, optimizer, loss_fn, future_steps)
+        train_results = train(model, train_loader, optimizer, loss_fn)
         training_losses.append(train_results)
 
         # Evaluate the model
-        eval_results = evaluate(model, test_loader, loss_fn, future_steps)
+        eval_results = evaluate(model, test_loader, loss_fn)
         val_losses.append(eval_results)
         if (epoch + 1) % 10 == 0:
             print(f"Epoch: {epoch + 1} Train Loss: {train_results}, Evaluation Loss: {eval_results}")
-
-        # Step the scheduler
-        scheduler.step()
 
         if eval_results < best_loss:
             best_loss = eval_results
             patience = patience_start  # Reset patience counter
         else:
             patience -= 1
-        if patience == 0:
+        if patience == 0 or epoch == epochs -1:
             best_training_loss = training_losses[-start_point]
             best_val_loss = val_losses[-start_point]
             print(f"Best Train Loss: {best_training_loss}, Best Val Loss: {best_val_loss}")
+            plot_predictions(model, test_data, sequence_length, sequence_length)
             break
 
     best_training_loss = training_losses[-1]
