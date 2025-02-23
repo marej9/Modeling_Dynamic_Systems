@@ -27,6 +27,7 @@ import torch.utils.data as data
 import torch.optim as optim
 from optuna.pruners import MedianPruner
 import optuna
+import time
 
 
 # Define the scaled dot product function
@@ -527,7 +528,8 @@ def objective(trial, file_path, sequence_length):
     # Initialize test_loss
     test_loss = None
     batch_size = trial.suggest_categorical('batch_size', [8, 16, 32, 64, 128])
-    epochs = 2
+    epochs=2
+    #epochs = trial.suggest_int('epochs', 60, 400, step = 20)
     input_dim = 3  # Number of features
     model_dim = trial.suggest_int('model_dim', 16, 128, step=2)
     embed_dim = model_dim
@@ -549,85 +551,68 @@ def objective(trial, file_path, sequence_length):
     # Initialize the model
     model = TransformerPredictor(input_dim, model_dim, num_heads, dim_feedforward, num_layers, dropout, input_dropout)
 
-    # Initialize the optimizer
+     # Initialize the optimizer
     optimizer = optim.Adam(model.parameters(), lr=learning_rate)
 
+    # Initialize the scheduler
+    scheduler = CosineWarmupScheduler(optimizer, warmup=10, max_iters=epochs)
     # Loss function
     loss_fn = nn.MSELoss()
     
     training_losses = []
     val_losses = []
     test_losses = []
+    patience_start = 50
+    if patience_start > epochs:
+        patience_start = epochs
+    start_point = patience_start
+    training_losses = []
+    val_losses = []
+    best_loss = float("inf")
 
-    try:
-        for epoch in range(epochs):
-            # Train the model
-            train_results = train(model, train_loader, optimizer, loss_fn)
-            training_losses.append(train_results)
+    for epoch in range(epochs):
+        # Train the model
+        train_results = train(model, train_loader, optimizer, loss_fn)
+        training_losses.append(train_results)
 
-            # Evaluate the model
-            val_results = validation(model, val_loader, loss_fn)
-            val_losses.append(val_results)
+        # Evaluate the model
+        val_results = validation(model, val_loader, loss_fn)
+        val_losses.append(val_results)
 
-            trial.report(val_results, epoch)
-            test_loss = test(model, test_loader, loss_fn)
-            test_losses.append(test_loss)
-            
-            if trial.should_prune():
-                raise optuna.TrialPruned()
-            
-            if (epoch + 1) % 10 == 0:
-                print(f"Epoch: {epoch + 1} Train Loss: {train_results}, Validation Loss: {val_results}")
-
-    except KeyboardInterrupt:
-        print("Training interrupted by user. Saving current parameters and test loss...")
-
-    except Exception as e:
-        print(f"An unexpected error occurred: {e}. Saving current parameters and test loss...")
-
-    finally:
-        if val_losses and test_losses:
-            params = {
-                "batch_size": batch_size,
-                "model_dim": model_dim,
-                "dim_feed_forward": dim_feedforward,
-                "num_layers": num_layers,
-                "dropout": dropout,
-                "input_dropout": input_dropout,
-                "learning_rate": learning_rate,
-                "val_loss": val_losses[-1],  # Save the best validation loss
-                "sequence_length": sequence_length  # Save the sequence length
-            }
+        test_loss = test(model, test_loader, loss_fn)
+        test_losses.append(test_loss)
+        
+        if val_results < best_loss:
+            best_loss = val_results
+            patience = patience_start  # Reset patience counter
         else:
-            params = {
-                "batch_size": batch_size,
-                "model_dim": model_dim,
-                "dim_feed_forward": dim_feedforward,
-                "num_layers": num_layers,
-                "dropout": dropout,
-                "input_dropout": input_dropout,
-                "learning_rate": learning_rate,
-                "val_loss": None,  # Save None if no validation loss is available
-                "sequence_length": sequence_length  # Save the sequence length
-            }
-        results = dict()
-        results[file_path] = params
-        with open('all_best_hyperparams.json', 'w') as f:
-            json.dump(results, f)
-    return val_results
+            patience -= 1
+        if patience == 0 or epoch == epochs - 1:
+            best_val_loss = val_losses[-start_point]
+
+            break 
+
+        # Step the scheduler
+        scheduler.step()
+            
+  
+    return best_val_loss
 
 def optimize_for_datasets(dataset_paths, sequence_lengths):
     results = {}
     
     for file_path in dataset_paths:
         for sequence_length in sequence_lengths:
-            study = optuna.create_study(direction='minimize', pruner=MedianPruner())
-            study.optimize(lambda trial: objective(trial, file_path, sequence_length), n_trials=3)
+            start_time = time.time()  # Record the start time
+            study = optuna.create_study(direction='minimize')
+            study.optimize(lambda trial: objective(trial, file_path, sequence_length), n_trials=1)
+            end_time = time.time()  # Record the end time
 
             best_params = study.best_params
             best_val_loss = study.best_value  # Get the best validation loss
             best_params["best_val_loss"] = best_val_loss  # Add the best validation loss to the parameters
             best_params["sequence_length"] = sequence_length  # Add the sequence length to the parameters
+            best_params["optimization_time"] = end_time - start_time  # Add the optimization time to the parameters
             results[f"{file_path}_seq_len_{sequence_length}"] = best_params
 
     with open('all_best_hyperparams.json', 'w') as f:
@@ -637,8 +622,8 @@ def optimize_for_datasets(dataset_paths, sequence_lengths):
 
 if __name__ == "__main__":
     dataset_paths = [
-        "/Users/Aleksandar/Documents/Uni/FP/Modeling_Dynamic_Systems/Models/lorenz_system_data.csv"
+        "/Users/Aleksandar/Documents/Uni/FP/Modeling_Dynamic_Systems/DynSys_and_DataSets/lorenz_system/lorenz_system_data.csv"
     ]
     sequence_lengths = [0.5, 1.0, 2.0, 5.0]
-    sequence_lengths = [int(x * 30) for x in sequence_lengths]
+    sequence_lengths = [int(x * 50) for x in sequence_lengths]
     optimize_for_datasets(dataset_paths, sequence_lengths)
