@@ -25,16 +25,7 @@ import torch.nn as nn
 import torch.nn.functional as F
 import torch.utils.data as data
 import torch.optim as optim
-
-## Torchvision
-import torchvision
-from torchvision.datasets import CIFAR100
-from torchvision import transforms
-
-import pytorch_lightning as pl
-from pytorch_lightning.callbacks import LearningRateMonitor, ModelCheckpoint
-
-## Bayesian Hyperparam Optim
+from optuna.pruners import MedianPruner
 import optuna
 
 
@@ -90,11 +81,14 @@ class MultiheadAttention(nn.Module):
             mask = expand_mask(mask)
         # Projects the input tensor x into a combined query, key, and value tensor using the qkv_proj linear layer.
         qkv = self.qkv_proj(x)
+        
         qkv = qkv.reshape(batch_size, seq_length, self.num_heads, 3*self.head_dim)
+        
         # Permutes the dimensions to [batch_size, num_heads, seq_length, 3*head_dim] to facilitate splitting into Q, K, and V.
         qkv = qkv.permute(0, 2, 1, 3)
         # Splits the combined tensor into three separate tensors: query (q), key (k), and value (v), each with shape [batch_size, num_heads, seq_length, head_dim].
         q, k, v = qkv.chunk(3, dim=-1)
+        
         values, attention = scaled_dot_product(q, k, v, mask=mask)
         # Permutes the dimensions of the values tensor to [batch_size, seq_length, num_heads, head_dim]
         values = values.permute(0, 2, 1, 3)
@@ -102,6 +96,7 @@ class MultiheadAttention(nn.Module):
         values = values.reshape(batch_size, seq_length, self.embed_dim)
         # Projects the concatenated values tensor back to the original embedding dimension using the o_proj linear layer.
         o = self.o_proj(values)
+        
         if return_attention:
             return o, attention
         else:
@@ -145,7 +140,6 @@ class EncoderBlock(nn.Module):
         linear_out = self.linear_net(x)
         x = x + self.dropout(linear_out)
         x = self.norm2(x)
-
         return x
     
         
@@ -167,6 +161,7 @@ class TransformerEncoder(nn.Module):
             attention_maps.append(attn_map)
             x = l(x)
         return attention_maps
+    
     
 
 # Define the PositionalEncoding class
@@ -207,25 +202,55 @@ class CosineWarmupScheduler(optim.lr_scheduler._LRScheduler):
             lr_factor *= epoch * 1.0 / self.warmup
         return lr_factor
     
-    # Define the TransformerPredictor class
+# Define the TransformerPredictor class
 class TransformerPredictor(nn.Module):
-    def __init__(self, input_dim, embed_dim, num_heads, dim_feedforward, num_layers, dropout=0.1):
+    def __init__(self, input_dim, model_dim, num_heads, dim_feedforward, num_layers, dropout=0.1, input_dropout=0.1):
         super().__init__()
-        self.pos_encoder = PositionalEncoding(input_dim)
-        self.encoder = TransformerEncoder(
-            num_layers=num_layers,
-            input_dim=input_dim,
-            embed_dim=embed_dim,
-            num_heads=num_heads,
-            dim_feedforward=dim_feedforward,
-            dropout=dropout
-        )
-        self.fc_out = nn.Linear(input_dim, input_dim)
+        self.input_dim = input_dim
+        self.model_dim = model_dim
+        self.num_heads = num_heads
+        self.dim_feedforward = dim_feedforward
+        self.num_layers = num_layers
+        self.dropout = dropout
+        self.input_dropout = input_dropout
+        self._create_model()
 
-    def forward(self, x, future_steps):
-        x = self.pos_encoder(x)
-        x = self.encoder(x)
-        x = self.fc_out(x)
+    def _create_model(self):
+        # Input dim -> Model dim
+        self.input_net = nn.Sequential(
+            nn.Dropout(self.input_dropout),
+            nn.Linear(self.input_dim, self.model_dim),
+            nn.ReLU(inplace=True),  # Activation function
+            nn.Linear(self.model_dim, self.model_dim)  # Additional layer
+        )
+        # Positional encoding for sequences
+        self.positional_encoding = PositionalEncoding(d_model=self.model_dim)
+        # Transformer
+        self.transformer = TransformerEncoder(
+            num_layers=self.num_layers,
+            input_dim=self.model_dim,
+            embed_dim=self.model_dim,
+            num_heads=self.num_heads,
+            dim_feedforward=2*self.model_dim,
+            dropout=self.dropout
+        )
+        # Output classifier per sequence element
+        self.output_net = nn.Sequential(
+            nn.Linear(self.model_dim, self.model_dim),
+            nn.LayerNorm(self.model_dim),
+            nn.ReLU(inplace=True),
+            nn.Dropout(self.dropout),
+            nn.Linear(self.model_dim, self.model_dim),  # Additional layer
+            nn.ReLU(inplace=True),  # Activation function
+            nn.Linear(self.model_dim, self.input_dim)
+        )
+
+    def forward(self, x, mask=None, add_positional_encoding=True):
+        x = self.input_net(x)
+        if add_positional_encoding:
+            x = self.positional_encoding(x)
+        x = self.transformer(x, mask=mask)
+        x = self.output_net(x)
         return x
     
 
@@ -283,17 +308,18 @@ def create_dataloader(file_path, batch_size, sequence_length, shuffle=False):
 
     return DataLoader(dataset, batch_size=batch_size, shuffle=shuffle, drop_last=True)
 
-def split_and_normalize_dataset(file_path, train_ratio=0.7):
+def split_and_normalize_dataset(file_path, train_ratio=0.7, val_ratio = 0.15):
 
     data = pd.read_csv(file_path).iloc[1:, 1:].values
     data = torch.tensor(data, dtype=torch.float32)
 
     dataset_size = len(data) 
     train_size = int(train_ratio * dataset_size)
-    val_size = dataset_size - train_size
-
-    train_data = data[:train_size ]
-    val_data = data[train_size:]
+    val_size =  int(val_ratio * dataset_size)
+    
+    train_data = data[:train_size]
+    val_data = data[train_size:train_size + val_size]
+    test_data = data[train_size+val_size:]
 
     #compute mean and standard deviation over features (columns)
     train_mean = train_data.mean(dim=0)
@@ -302,13 +328,21 @@ def split_and_normalize_dataset(file_path, train_ratio=0.7):
     # Apply normalization
     normalized_train_data = (train_data - train_mean) / train_std
     normalized_val_data = (val_data - train_mean) / train_std
+    normalized_test_data = (test_data - train_mean) / train_std
 
-    return normalized_train_data, normalized_val_data
+    return normalized_train_data, normalized_val_data, normalized_test_data
 
 # Train Function
-def train(model, data, optimizer, loss_fn, future_steps):
+def train(model, data, optimizer, loss_fn):
 
-    device = "mps"
+    if torch.cuda.is_available():
+        device = "cuda"
+    elif  torch.backends.mps.is_available():
+        device = "mps"
+    else:
+        device = "cpu"
+
+    device = torch.device(device)
     model.to(device)
     model.train()
 
@@ -323,7 +357,7 @@ def train(model, data, optimizer, loss_fn, future_steps):
         # Clear gradients
         optimizer.zero_grad()
 
-        prediction = model(X, future_steps = future_steps)
+        prediction = model(X)
         loss = loss_fn(prediction, Y)
         # prediction of shape (batch_size, future_steps, output_size=features)
         # Y of shape (batch_size, future_steps, output_size=features)        
@@ -337,7 +371,7 @@ def train(model, data, optimizer, loss_fn, future_steps):
     return train_loss
 
 
-def evaluate(model, dataloader, loss_fn, future_steps):
+def validation(model, dataloader, loss_fn):
     """
     Evaluates the model on the given dataloader and calculates the average loss.
     
@@ -350,7 +384,14 @@ def evaluate(model, dataloader, loss_fn, future_steps):
     Returns:
         avg_loss: Average loss over the entire dataset
     """
-    device = "mps"
+    if torch.cuda.is_available():
+        device = "cuda"
+    elif  torch.backends.mps.is_available():
+        device = "mps"
+    else:
+        device = "cpu"
+
+    device = torch.device(device)
     model.to(device)
     model.eval()  # Set model to evaluation mode
     
@@ -360,7 +401,7 @@ def evaluate(model, dataloader, loss_fn, future_steps):
         for X, Y in dataloader:  # Iterate over batches
             X, Y = X.to(device), Y.to(device)
             
-            predictions = model(X, future_steps=future_steps)
+            predictions = model(X)
             loss = loss_fn(predictions, Y)
             all_losses.append(loss.item())
 
@@ -369,82 +410,235 @@ def evaluate(model, dataloader, loss_fn, future_steps):
 
     return  val_loss
 
+def test(model, dataloader, loss_fn):
+    """
+    Test the model on the given dataloader and calculates the average loss.
+    
+    Parameters:
+        model: Trained RNN model
+        dataloader: DataLoader containing the evaluation dataset
+        loss_fn: Loss function (e.g., MSELoss)
+        future_steps: Number of future steps to predict
+        
+    Returns:
+        avg_loss: Average loss over the entire dataset
+    """
+    if torch.cuda.is_available():
+        device = "cuda"
+    elif  torch.backends.mps.is_available():
+        device = "mps"
+    else:
+        device = "cpu"
+    device = torch.device(device)
+    model.to(device)
+    model.eval()  # Set model to evaluation mode
+    
+    all_losses = []
 
-'''Hyperparamter optimization'''
-def objective(trial):
+    with torch.no_grad():  # Disable gradient computation for evaluation
+        for X, Y in dataloader:  # Iterate over batches
+            X, Y = X.to(device), Y.to(device)
+            
+            predictions = model(X)
+            loss = loss_fn(predictions, Y)
+            all_losses.append(loss.item())
 
+    test_loss = np.mean(all_losses)  # Calculate the average loss
+    #print(f"==> Average Loss: {val_loss:.6f}")
+
+    return  test_loss
+
+def plot_predictions(model, data, sequence_length, future_steps):
+    if torch.cuda.is_available():
+        device = "cuda"
+    elif  torch.backends.mps.is_available():
+        device = "mps"
+    else:
+        device = "cpu"
+    device = torch.device(device)
+    model.to(device)
+    
+    model.eval()  # Set model to evaluation mode
+
+    # Select a random starting point for the sequence
+    start_idx = 100
+    input_sequence = data[start_idx:start_idx + sequence_length].unsqueeze(0).to(device)  # Add batch dimension
+
+
+    # Get the actual future steps
+    actual_future = data[start_idx + sequence_length:start_idx + sequence_length + future_steps].to(device)
+
+    # Predict future steps
+    with torch.no_grad():
+        predicted_future = model(input_sequence).squeeze(0)  # Remove batch dimension
+
+    
+    # Convert tensors to lists for plotting
+    actual_future = actual_future.cpu().tolist()
+    predicted_future = predicted_future.cpu().tolist()
+    
+    # Plot the results in 2D
+    time_steps = list(range(future_steps))
+    plt.figure(figsize=(12, 6))
+
+    # Plot x
+    plt.subplot(3, 1, 1)
+    plt.plot(time_steps, [x[0] for x in actual_future], label='Actual Future')
+    plt.plot(time_steps, [x[0] for x in predicted_future], label='Predicted Future')
+    plt.title('X')
+    plt.legend()
+
+    # Plot y
+    plt.subplot(3, 1, 2)
+    plt.plot(time_steps, [x[1] for x in actual_future], label='Actual Future')
+    plt.plot(time_steps, [x[1] for x in predicted_future], label='Predicted Future')
+    plt.title('Y')
+    plt.legend()
+
+    # Plot z
+    plt.subplot(3, 1, 3)
+    plt.plot(time_steps, [x[2] for x in actual_future], label='Actual Future')
+    plt.plot(time_steps, [x[2] for x in predicted_future], label='Predicted Future')
+    plt.title('Z')
+    plt.legend()
+
+    plt.tight_layout()
+    plt.show()
+
+    # Plot the results in 3D
+    fig = plt.figure(figsize=(10, 8))
+    ax = fig.add_subplot(111, projection='3d')
+
+    ax.plot([x[0] for x in actual_future], [x[1] for x in actual_future], [x[2] for x in actual_future], label='Actual Future', color='b')
+    ax.plot([x[0] for x in predicted_future], [x[1] for x in predicted_future], [x[2] for x in predicted_future], label='Predicted Future', color='r', linestyle='--')
+
+    ax.set_xlabel('X')
+    ax.set_ylabel('Y')
+    ax.set_zlabel('Z')
+    ax.set_title('3D Plot of Actual vs Predicted Future Steps')
+    ax.legend()
+
+    plt.show()
+
+
+
+
+def objective(trial, file_path, sequence_length):
+    # Initialize test_loss
+    test_loss = None
     batch_size = trial.suggest_categorical('batch_size', [8, 16, 32, 64, 128])
-    sequence_length = 20
-    epochs = trial.suggest_int('epochs', 10, 50)
+    epochs = 2
     input_dim = 3  # Number of features
-    embed_dim = input_dim
-
-    valid_heads = [h for h in range(1, min(embed_dim, 5) + 1) if embed_dim % h == 0]
-    num_heads = trial.suggest_categorical("num_heads", valid_heads)
-
+    model_dim = trial.suggest_int('model_dim', 16, 128, step=2)
+    embed_dim = model_dim
+    num_heads = trial.suggest_categorical("num_heads", [1, 2])
     dim_feedforward = trial.suggest_int('dim_feed_forward', 4, 256)
     num_layers = trial.suggest_int('num_layers', 2, 16)
-    dropout = 0.1
-    future_steps = 20
-    learning_rate = trial.suggest_float("learning_rate", 1e-5, 1e-1, log=True)
+    dropout = trial.suggest_float("dropout", 0.0, 0.1)
+    input_dropout = trial.suggest_float("input_dropout", 0.0, 0.1)
+    learning_rate = trial.suggest_float("learning_rate", 1e-8, 1e-1, log=True)
 
     # Load and preprocess data
-    file_path = "/Users/Aleksandar/Documents/Uni/FP/Modeling_Dynamic_Systems/DynSys_and_DataSets/lorenz_system/lorenz_system_data_5.csv"
-    train_data, test_data = split_and_normalize_dataset(file_path)
+    train_data, val_data, test_data = split_and_normalize_dataset(file_path)
 
     # Create dataloaders
-    train_loader = create_dataloader(train_data, batch_size, sequence_length, shuffle=True)
+    train_loader = create_dataloader(train_data, batch_size, sequence_length, shuffle=False)
+    val_loader = create_dataloader(val_data, batch_size, sequence_length, shuffle=False)
     test_loader = create_dataloader(test_data, batch_size, sequence_length, shuffle=False)
 
     # Initialize the model
-    model = TransformerPredictor(input_dim, embed_dim, num_heads, dim_feedforward, num_layers, dropout)
+    model = TransformerPredictor(input_dim, model_dim, num_heads, dim_feedforward, num_layers, dropout, input_dropout)
 
-    # Initialize the optimizer with CosineWarmupScheduler
+    # Initialize the optimizer
     optimizer = optim.Adam(model.parameters(), lr=learning_rate)
-    scheduler = CosineWarmupScheduler(optimizer, warmup=10, max_iters=epochs)
 
     # Loss function
     loss_fn = nn.MSELoss()
+    
+    training_losses = []
+    val_losses = []
+    test_losses = []
 
-    patience_start = 50
-    start_point = patience_start
-    training_losses = list()
-    val_losses = list()
-    best_loss = float("inf")
+    try:
+        for epoch in range(epochs):
+            # Train the model
+            train_results = train(model, train_loader, optimizer, loss_fn)
+            training_losses.append(train_results)
 
-    for epoch in range(epochs):
-        # Train the model
-        train_results = train(model, train_loader, optimizer, loss_fn, future_steps)
-        training_losses.append(train_results)
+            # Evaluate the model
+            val_results = validation(model, val_loader, loss_fn)
+            val_losses.append(val_results)
 
-        # Evaluate the model
-        eval_results = evaluate(model, test_loader, loss_fn, future_steps)
-        val_losses.append(eval_results)
-        if (epoch + 1) % 10 == 0:
-            print(f"Epoch: {epoch + 1} Train Loss: {train_results}, Evaluation Loss: {eval_results}")
+            trial.report(val_results, epoch)
+            test_loss = test(model, test_loader, loss_fn)
+            test_losses.append(test_loss)
+            
+            if trial.should_prune():
+                raise optuna.TrialPruned()
+            
+            if (epoch + 1) % 10 == 0:
+                print(f"Epoch: {epoch + 1} Train Loss: {train_results}, Validation Loss: {val_results}")
 
-        # Step the scheduler
-        scheduler.step()
+    except KeyboardInterrupt:
+        print("Training interrupted by user. Saving current parameters and test loss...")
 
-        if eval_results < best_loss:
-            best_loss = eval_results
-            patience = patience_start  # Reset patience counter
+    except Exception as e:
+        print(f"An unexpected error occurred: {e}. Saving current parameters and test loss...")
+
+    finally:
+        if val_losses and test_losses:
+            params = {
+                "batch_size": batch_size,
+                "model_dim": model_dim,
+                "dim_feed_forward": dim_feedforward,
+                "num_layers": num_layers,
+                "dropout": dropout,
+                "input_dropout": input_dropout,
+                "learning_rate": learning_rate,
+                "val_loss": val_losses[-1],  # Save the best validation loss
+                "sequence_length": sequence_length  # Save the sequence length
+            }
         else:
-            patience -= 1
-        if patience == 0 or epoch == epochs-1:
-            best_training_loss = training_losses[-start_point]
-            best_val_loss = val_losses[-start_point]
-            print(f"Best Train Loss: {best_training_loss}, Best Val Loss: {best_val_loss}")
-            break
+            params = {
+                "batch_size": batch_size,
+                "model_dim": model_dim,
+                "dim_feed_forward": dim_feedforward,
+                "num_layers": num_layers,
+                "dropout": dropout,
+                "input_dropout": input_dropout,
+                "learning_rate": learning_rate,
+                "val_loss": None,  # Save None if no validation loss is available
+                "sequence_length": sequence_length  # Save the sequence length
+            }
+        results = dict()
+        results[file_path] = params
+        with open('all_best_hyperparams.json', 'w') as f:
+            json.dump(results, f)
+    return val_results
 
-    #best_training_loss = training_losses[-1]
-    #best_val_loss = val_losses[-1]
+def optimize_for_datasets(dataset_paths, sequence_lengths):
+    results = {}
+    
+    for file_path in dataset_paths:
+        for sequence_length in sequence_lengths:
+            study = optuna.create_study(direction='minimize', pruner=MedianPruner())
+            study.optimize(lambda trial: objective(trial, file_path, sequence_length), n_trials=3)
 
-    return best_val_loss
+            best_params = study.best_params
+            best_val_loss = study.best_value  # Get the best validation loss
+            best_params["best_val_loss"] = best_val_loss  # Add the best validation loss to the parameters
+            best_params["sequence_length"] = sequence_length  # Add the sequence length to the parameters
+            results[f"{file_path}_seq_len_{sequence_length}"] = best_params
 
+    with open('all_best_hyperparams.json', 'w') as f:
+        json.dump(results, f)
+
+    print("Beste Parameter für alle Datasets und Sequenzlängen:", results)
 
 if __name__ == "__main__":
-    
-    study = optuna.create_study(direction='minimize')
-    study.optimize(objective, n_trials = 10)
-    print('Best hyperparams: ',study.best_params)
+    dataset_paths = [
+        "/Users/Aleksandar/Documents/Uni/FP/Modeling_Dynamic_Systems/Models/lorenz_system_data.csv"
+    ]
+    sequence_lengths = [0.5, 1.0, 2.0, 5.0]
+    sequence_lengths = [int(x * 30) for x in sequence_lengths]
+    optimize_for_datasets(dataset_paths, sequence_lengths)

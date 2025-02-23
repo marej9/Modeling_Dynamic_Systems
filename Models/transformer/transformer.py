@@ -26,13 +26,7 @@ import torch.nn.functional as F
 import torch.utils.data as data
 import torch.optim as optim
 
-## Torchvision
-import torchvision
-from torchvision.datasets import CIFAR100
-from torchvision import transforms
-
-import pytorch_lightning as pl
-from pytorch_lightning.callbacks import LearningRateMonitor, ModelCheckpoint
+import optuna
 
 
 # Define the scaled dot product function
@@ -225,7 +219,9 @@ class TransformerPredictor(nn.Module):
         # Input dim -> Model dim
         self.input_net = nn.Sequential(
             nn.Dropout(self.input_dropout),
-            nn.Linear(self.input_dim, self.model_dim)
+            nn.Linear(self.input_dim, self.model_dim),
+            nn.ReLU(inplace=True),  # Activation function
+            nn.Linear(self.model_dim, self.model_dim)  # Additional layer
         )
         # Positional encoding for sequences
         self.positional_encoding = PositionalEncoding(d_model=self.model_dim)
@@ -244,6 +240,8 @@ class TransformerPredictor(nn.Module):
             nn.LayerNorm(self.model_dim),
             nn.ReLU(inplace=True),
             nn.Dropout(self.dropout),
+            nn.Linear(self.model_dim, self.model_dim),  # Additional layer
+            nn.ReLU(inplace=True),  # Activation function
             nn.Linear(self.model_dim, self.input_dim)
         )
 
@@ -310,17 +308,18 @@ def create_dataloader(file_path, batch_size, sequence_length, shuffle=False):
 
     return DataLoader(dataset, batch_size=batch_size, shuffle=shuffle, drop_last=True)
 
-def split_and_normalize_dataset(file_path, train_ratio=0.7):
+def split_and_normalize_dataset(file_path, train_ratio=0.7, val_ratio = 0.15):
 
     data = pd.read_csv(file_path).iloc[1:, 1:].values
     data = torch.tensor(data, dtype=torch.float32)
 
     dataset_size = len(data) 
     train_size = int(train_ratio * dataset_size)
-    val_size = dataset_size - train_size
-
-    train_data = data[:train_size ]
-    val_data = data[train_size:]
+    val_size =  int(val_ratio * dataset_size)
+    
+    train_data = data[:train_size]
+    val_data = data[train_size:train_size + val_size]
+    test_data = data[train_size+val_size:]
 
     #compute mean and standard deviation over features (columns)
     train_mean = train_data.mean(dim=0)
@@ -329,13 +328,21 @@ def split_and_normalize_dataset(file_path, train_ratio=0.7):
     # Apply normalization
     normalized_train_data = (train_data - train_mean) / train_std
     normalized_val_data = (val_data - train_mean) / train_std
+    normalized_test_data = (test_data - train_mean) / train_std
 
-    return normalized_train_data, normalized_val_data
+    return normalized_train_data, normalized_val_data, normalized_test_data
 
 # Train Function
 def train(model, data, optimizer, loss_fn):
 
-    device = "mps"
+    if torch.cuda.is_available():
+        device = "cuda"
+    elif  torch.backends.mps.is_available():
+        device = "mps"
+    else:
+        device = "cpu"
+
+    device = torch.device(device)
     model.to(device)
     model.train()
 
@@ -364,7 +371,7 @@ def train(model, data, optimizer, loss_fn):
     return train_loss
 
 
-def evaluate(model, dataloader, loss_fn):
+def validation(model, dataloader, loss_fn):
     """
     Evaluates the model on the given dataloader and calculates the average loss.
     
@@ -377,7 +384,14 @@ def evaluate(model, dataloader, loss_fn):
     Returns:
         avg_loss: Average loss over the entire dataset
     """
-    device = "mps"
+    if torch.cuda.is_available():
+        device = "cuda"
+    elif  torch.backends.mps.is_available():
+        device = "mps"
+    else:
+        device = "cpu"
+
+    device = torch.device(device)
     model.to(device)
     model.eval()  # Set model to evaluation mode
     
@@ -396,14 +410,59 @@ def evaluate(model, dataloader, loss_fn):
 
     return  val_loss
 
+def test(model, dataloader, loss_fn):
+    """
+    Test the model on the given dataloader and calculates the average loss.
+    
+    Parameters:
+        model: Trained RNN model
+        dataloader: DataLoader containing the evaluation dataset
+        loss_fn: Loss function (e.g., MSELoss)
+        future_steps: Number of future steps to predict
+        
+    Returns:
+        avg_loss: Average loss over the entire dataset
+    """
+    if torch.cuda.is_available():
+        device = "cuda"
+    elif  torch.backends.mps.is_available():
+        device = "mps"
+    else:
+        device = "cpu"
+    device = torch.device(device)
+    model.to(device)
+    model.eval()  # Set model to evaluation mode
+    
+    all_losses = []
+
+    with torch.no_grad():  # Disable gradient computation for evaluation
+        for X, Y in dataloader:  # Iterate over batches
+            X, Y = X.to(device), Y.to(device)
+            
+            predictions = model(X)
+            loss = loss_fn(predictions, Y)
+            all_losses.append(loss.item())
+
+    test_loss = np.mean(all_losses)  # Calculate the average loss
+    #print(f"==> Average Loss: {val_loss:.6f}")
+
+    return  test_loss
+
 def plot_predictions(model, data, sequence_length, future_steps):
-    device = torch.device("mps" if torch.backends.mps.is_available() else "cpu")
+    if torch.cuda.is_available():
+        device = "cuda"
+    elif  torch.backends.mps.is_available():
+        device = "mps"
+    else:
+        device = "cpu"
+    device = torch.device(device)
     model.to(device)
     
     model.eval()  # Set model to evaluation mode
 
     # Select a random starting point for the sequence
-    start_idx = 100
+    
+    start_idx = random.randint(0, len(data) - sequence_length - 1)
     input_sequence = data[start_idx:start_idx + sequence_length].unsqueeze(0).to(device)  # Add batch dimension
 
 
@@ -424,77 +483,93 @@ def plot_predictions(model, data, sequence_length, future_steps):
     plt.figure(figsize=(12, 6))
 
     # Plot x
-    plt.subplot(3, 1, 1)
+    plt.subplot(2, 1, 1)
     plt.plot(time_steps, [x[0] for x in actual_future], label='Actual Future')
     plt.plot(time_steps, [x[0] for x in predicted_future], label='Predicted Future')
     plt.title('X')
     plt.legend()
 
     # Plot y
-    plt.subplot(3, 1, 2)
+    plt.subplot(2, 1, 2)
     plt.plot(time_steps, [x[1] for x in actual_future], label='Actual Future')
     plt.plot(time_steps, [x[1] for x in predicted_future], label='Predicted Future')
     plt.title('Y')
     plt.legend()
 
     # Plot z
-    plt.subplot(3, 1, 3)
-    plt.plot(time_steps, [x[2] for x in actual_future], label='Actual Future')
-    plt.plot(time_steps, [x[2] for x in predicted_future], label='Predicted Future')
-    plt.title('Z')
-    plt.legend()
+    #plt.subplot(3, 1, 3)
+    #plt.plot(time_steps, [x[2] for x in actual_future], label='Actual Future')
+    #plt.plot(time_steps, [x[2] for x in predicted_future], label='Predicted Future')
+    #plt.title('Z')
+    #plt.legend()
 
-    plt.tight_layout()
-    plt.show()
+    #plt.tight_layout()
+    #plt.show()
 
     # Plot the results in 3D
     fig = plt.figure(figsize=(10, 8))
     ax = fig.add_subplot(111, projection='3d')
 
-    ax.plot([x[0] for x in actual_future], [x[1] for x in actual_future], [x[2] for x in actual_future], label='Actual Future', color='b')
-    ax.plot([x[0] for x in predicted_future], [x[1] for x in predicted_future], [x[2] for x in predicted_future], label='Predicted Future', color='r', linestyle='--')
+    ax.plot([x[0] for x in actual_future], [x[1] for x in actual_future], label='Actual Future', color='b')
+    ax.plot([x[0] for x in predicted_future], [x[1] for x in predicted_future], label='Predicted Future', color='r', linestyle='--')
+    #ax.plot([x[0] for x in actual_future], [x[1] for x in actual_future], [x[2] for x in actual_future], label='Actual Future', color='b')
+    #ax.plot([x[0] for x in predicted_future], [x[1] for x in predicted_future], [x[2] for x in predicted_future], label='Predicted Future', color='r', linestyle='--')
+
+    ax.set_xlabel('X')
 
     ax.set_xlabel('X')
     ax.set_ylabel('Y')
-    ax.set_zlabel('Z')
+    #ax.set_zlabel('Z')
     ax.set_title('3D Plot of Actual vs Predicted Future Steps')
     ax.legend()
 
     plt.show()
 
 
+
+
+
 if __name__ == "__main__":
-    # Define hyperparameters
-    batch_size = 128
-    sequence_length = 20
-    epochs = 500
-    input_dim = 3  # Number of features
-    model_dim = 128  # Hidden dimensionality inside the Transformer
-    num_heads = 4
+        # Your existing code
+    batch_size = 64
+    sequence_length = 80
+    epochs = 30
+    input_dim = 2  # Number of features
+    model_dim = 64
+    embed_dim = model_dim
+    num_heads = 2
+
     dim_feedforward = 64
-    num_layers = 2
+    num_layers = 1
     dropout = 0.0
     input_dropout = 0.0
-    future_steps = 20
+    learning_rate = 0.001
 
     # Load and preprocess data
-    file_path = "/Users/Aleksandar/Documents/Uni/FP/Modeling_Dynamic_Systems/DynSys_and_DataSets/lorenz_system/lorenz_system_data_5.csv"
-    train_data, test_data = split_and_normalize_dataset(file_path)
+    file_path = '/Users/Aleksandar/Documents/Uni/FP/Modeling_Dynamic_Systems/Models/van_der_pol_stochastic_data.csv'
+    train_data, val_data, test_data = split_and_normalize_dataset(file_path)
 
     # Create dataloaders
-    train_loader = create_dataloader(train_data, batch_size, sequence_length, shuffle=True)
+    train_loader = create_dataloader(train_data, batch_size, sequence_length, shuffle=False)
+    val_loader = create_dataloader(val_data, batch_size, sequence_length, shuffle=False)
     test_loader = create_dataloader(test_data, batch_size, sequence_length, shuffle=False)
 
     # Initialize the model
     model = TransformerPredictor(input_dim, model_dim, num_heads, dim_feedforward, num_layers, dropout, input_dropout)
 
     # Initialize the optimizer
-    optimizer = optim.Adam(model.parameters(), lr=0.001)
+    optimizer = optim.Adam(model.parameters(), lr=learning_rate)
+
+    # Initialize the scheduler
+    scheduler = CosineWarmupScheduler(optimizer, warmup=10, max_iters=epochs)
 
     # Loss function
     loss_fn = nn.MSELoss()
-
     patience_start = 50
+    if patience_start > epochs:
+        patience_start = epochs
+    else:
+        patience_start = 50
     start_point = patience_start
     training_losses = []
     val_losses = []
@@ -506,22 +581,25 @@ if __name__ == "__main__":
         training_losses.append(train_results)
 
         # Evaluate the model
-        eval_results = evaluate(model, test_loader, loss_fn)
-        val_losses.append(eval_results)
+        val_results = validation(model, val_loader, loss_fn)
+        val_losses.append(val_results)
         if (epoch + 1) % 10 == 0:
-            print(f"Epoch: {epoch + 1} Train Loss: {train_results}, Evaluation Loss: {eval_results}")
+            print(f"Epoch: {epoch + 1} Train Loss: {train_results}, Validation Loss: {val_results}")
 
-        if eval_results < best_loss:
-            best_loss = eval_results
+        if val_results < best_loss:
+            best_loss = val_results
             patience = patience_start  # Reset patience counter
         else:
             patience -= 1
-        if patience == 0 or epoch == epochs -1:
+        if patience == 0 or epoch == epochs - 1:
             best_training_loss = training_losses[-start_point]
             best_val_loss = val_losses[-start_point]
+            test_loss = test(model, test_loader, loss_fn)
+            print("test_loss:", test_loss)
             print(f"Best Train Loss: {best_training_loss}, Best Val Loss: {best_val_loss}")
-            plot_predictions(model, test_data, sequence_length, sequence_length)
-            break
+            break 
 
-    best_training_loss = training_losses[-1]
-    best_val_loss = val_losses[-1]
+        # Step the scheduler
+        scheduler.step()
+
+    plot_predictions(model, test_data, sequence_length, sequence_length)

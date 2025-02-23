@@ -5,12 +5,12 @@ from mpl_toolkits.mplot3d import Axes3D
 from scipy.integrate import odeint
 import os
 
-# Parameters for the Lorenz system
+# Konstanten für das Lorenz-System
 sigma = 10
 rho = 28
 beta = 8 / 3
 
-# Define the Lorenz system equations
+# Definition der Lorenz-Gleichungen
 def lorenz_deriv(state, t, sigma, rho, beta):
     x, y, z = state
     dx_dt = sigma * (y - x)
@@ -18,39 +18,57 @@ def lorenz_deriv(state, t, sigma, rho, beta):
     dz_dt = x * y - beta * z
     return [dx_dt, dy_dt, dz_dt]
 
-# Initial conditions and time span
-initial_state = [0.1, 0.1, 0.1]  # Starting point in phase space
-# t = np.linspace(0, 100, 20000)    # Time grid for integration
+# Funktion zur Generierung von Lorenz-System-Daten basierend auf Sampling-Parametern und Initialwerten
+def generate_lorenz_data(num_points, sampling_rate, initial_state, period):
+    """
+    Generiert Lorenz-System-Daten basierend auf Sampling-Parametern und Initialwerten.
 
-# Define the period and sampling rate
-period = 1.0  # Characteristic period of the Lorenz system (example value)
-sampling_rate = 12  # Number of points per period
+    Parameter:
+    - num_points: Gesamtanzahl der Datenpunkte
+    - sampling_rate: Anzahl der Punkte pro Periode
+    - initial_state: Liste der Anfangswerte [x0, y0, z0]
+    - period: Charakteristische Periode des Lorenz-Systems (Beispielwert)
 
-# Calculate the total number of points and time grid for integration
-total_time = 1000  # Total time for simulation
-num_points = int(total_time * sampling_rate / period)
-t = np.linspace(0, total_time, num_points)  # Time grid for integration
+    Rückgabe:
+    - DataFrame mit den Lorenz-System-Daten (Time, X, Y, Z)
+    """
+    
+    # Berechnung der Gesamtdauer der Simulation basierend auf num_points und sampling_rate
+    total_time = num_points * period / sampling_rate
+    
+    # Zeitraster für die Integration
+    t = np.linspace(0, total_time, num_points)
 
-# Numerical integration of the Lorenz equations
-trajectory = odeint(lorenz_deriv, initial_state, t, args=(sigma, rho, beta))
+    # Numerische Integration der Lorenz-Gleichungen
+    trajectory = odeint(lorenz_deriv, initial_state, t, args=(sigma, rho, beta))
 
-# Extract x, y, z components for visualization
-x, y, z = trajectory.T
+    # Extrahieren der x-, y-, z-Komponenten zur Visualisierung
+    x, y, z = trajectory.T
 
-# Save the dataset to a CSV file
-data = pd.DataFrame({'Time': t, 'X': x, 'Y': y, 'Z': z})
-file_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "lorenz_system_data_5.csv")
-data.to_csv(file_path, index=False)
+    # Erstellen eines DataFrames mit den Ergebnissen
+    data = pd.DataFrame({'Time': t, 'X': x, 'Y': y, 'Z': z})
+    
+    return data
+
+num_points = 50000  # Gesamtanzahl der Datenpunkte
+sampling_rate = 30  # Anzahl der Punkte pro Periode
+initial_state = [0.1, 0.1, 0.1]  # Anfangswerte [x0, y0, z0]
+period = 1  # Charakteristische Periode des Lorenz-Systems
+
+# Generierung der Lorenz-System-Daten
+lorenz_data = generate_lorenz_data(num_points, sampling_rate, initial_state, period)
+
+# Speichern des Datensatzes in einer CSV-Datei
+file_path = "lorenz_system_data.csv"
+lorenz_data.to_csv(file_path, index=False)
 print(f"Dataset saved to {file_path}'.")
 
-# Plotting the Lorenz attractor
+# Plotten des Lorenz-Attraktors
 fig = plt.figure(figsize=(10, 8))
 ax = fig.add_subplot(111, projection='3d')
-ax.plot(x, y, z, lw=0.5, color='b')
+ax.plot(lorenz_data['X'], lorenz_data['Y'], lorenz_data['Z'], lw=0.5, color='b')
 ax.set_xlabel("X")
 ax.set_ylabel("Y")
 ax.set_zlabel("Z")
 ax.set_title("Lorenz Attractor")
 plt.show()
-
-

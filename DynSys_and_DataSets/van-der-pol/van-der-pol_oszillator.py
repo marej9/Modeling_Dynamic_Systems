@@ -2,63 +2,69 @@ import numpy as np
 import pandas as pd
 import matplotlib.pyplot as plt
 import os
+from scipy.integrate import odeint
 
 # Parameter für den Van-der-Pol-Oszillator
-params_van_der_pol_optimal_construction = (2, 2, 5, 0.8)  # (p_a, p_mu, p_b, p_c)
+p_a, p_mu, p_b, p_c = 2, 2, 5, 0.8
 
-def make_2d_ct_van_der_pol(p_a, p_mu, p_b, p_c):
-    def _contfcn(x):
-        x0 = x[:, 0]
-        x1 = x[:, 1]
-        # Dynamik des Van-der-Pol-Oszillators
-        y0 = p_a * x1
-        y1 = p_mu * x1 * (1. - p_b * x0**2) - p_c * x0
-        return np.stack([y0, y1], axis=1)
-    return _contfcn
+# Definition der Van-der-Pol-Gleichungen
+def van_der_pol_deriv(state, t, p_a, p_mu, p_b, p_c):
+    x0, x1 = state
+    dx0_dt = p_a * x1
+    dx1_dt = p_mu * x1 * (1. - p_b * x0**2) - p_c * x0
+    return [dx0_dt, dx1_dt]
 
-# Simulation des Systems
-def simulate(fcn, x0, timesteps, dt):
-    trajectory = [x0]
-    x = x0
-    for step in range(timesteps):
-        dx = fcn(np.array([x]))[0]  # Dynamik für aktuellen Zustand
-        x = x + dx * dt
-        trajectory.append(x)
-    return np.array(trajectory)
+# Funktion zur Generierung von Van-der-Pol-Daten basierend auf Sampling-Parametern und Initialwerten
+def generate_van_der_pol_data(num_points, sampling_rate, initial_state, period):
+    """
+    Generiert Van-der-Pol-Daten basierend auf Sampling-Parametern und Initialwerten.
+
+    Parameter:
+    - num_points: Gesamtanzahl der Datenpunkte
+    - sampling_rate: Anzahl der Punkte pro Periode
+    - initial_state: Liste der Anfangswerte [x0, x1]
+    - period: Charakteristische Periode des Van-der-Pol-Oszillators (Beispielwert)
+
+    Rückgabe:
+    - DataFrame mit den Van-der-Pol-Daten (Time, x0, x1)
+    """
+    
+    # Berechnung der Gesamtdauer der Simulation basierend auf num_points und sampling_rate
+    total_time = num_points * period / sampling_rate
+    
+    # Zeitraster für die Integration
+    t = np.linspace(0, total_time, num_points)
+
+    # Numerische Integration der Van-der-Pol-Gleichungen
+    trajectory = odeint(van_der_pol_deriv, initial_state, t, args=(p_a, p_mu, p_b, p_c))
+
+    # Extrahieren der x0- und x1-Komponenten zur Visualisierung
+    x0, x1 = trajectory.T
+
+    # Erstellen eines DataFrames mit den Ergebnissen
+    data = pd.DataFrame({'Time': t, 'x0': x0, 'x1': x1})
+    
+    return data
 
 # Hyperparameter
-initial_state = [0.0001, 0.0001]  # Startzustand im Phasenraum (x0, x1)
-simulation_time = 1000        # Gesamtdauer der Simulation in Sekunden
-time_steps = 20000          # Anzahl der Zeitschritte
-t = np.linspace(0, simulation_time, time_steps)  # Zeitgitter für Integration
-dt = t[1] - t[0]            # Zeitschrittgröße berechnen
+num_points = 50000  # Gesamtanzahl der Datenpunkte
+sampling_rate = 8  # Anzahl der Punkte pro Periode
+initial_state = [0.0001, 0.0001]  # Anfangswerte [x0, x1]
+period = 1  # Charakteristische Periode des Van-der-Pol-Oszillators
 
-print(f"Zeitschrittgröße: {dt:.6f} Sekunden")
+# Generierung der Van-der-Pol-Daten
+van_der_pol_data = generate_van_der_pol_data(num_points, sampling_rate, initial_state, period)
 
-# Parameter und Funktion erstellen
-p_a, p_mu, p_b, p_c = params_van_der_pol_optimal_construction
-van_der_pol_fcn = make_2d_ct_van_der_pol(p_a, p_mu, p_b, p_c)
+# Speichern des Datensatzes in einer CSV-Datei
+file_path = "van_der_pol_data.csv"
+van_der_pol_data.to_csv(file_path, index=False)
+print(f"Dataset saved to {file_path}'.")
 
-# Simulation mit den neuen Parametern
-trajectory = simulate(van_der_pol_fcn, np.array(initial_state), len(t) - 1, dt)
-
-# CSV-Export
-data = np.hstack([t.reshape(-1, 1), trajectory])   # Zeit und Zustände kombinieren
-columns = ["Time", "x0", "x1"]
-df = pd.DataFrame(data, columns=columns)
-
-# Speichern in CSV
-csv_file = os.path.join(os.path.dirname(os.path.abspath(__file__)),"van_der_pol_data_5.csv")
-df.to_csv(csv_file, index=False)
-print(f"Datensatz wurde als '{csv_file}' gespeichert.")
-
-# Plot der Trajektorie
-plt.figure(figsize=(6, 6))
-plt.plot(trajectory[:, 0], trajectory[:, 1], label="Van der Pol Oscillator")
-plt.title("Van der Pol Oscillator - Phase Space")
+# Plotten der Van-der-Pol-Trajektorie
+plt.figure(figsize=(10, 8))
+plt.plot(van_der_pol_data['x0'], van_der_pol_data['x1'], lw=0.5, color='b')
 plt.xlabel("x0")
 plt.ylabel("x1")
-plt.axis('equal')
-plt.legend()
+plt.title("Van der Pol Oscillator - Phase Space")
 plt.grid(True)
 plt.show()
