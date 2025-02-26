@@ -59,7 +59,7 @@ period = 1  # Charakteristische Periode des Lorenz-Systems
 lorenz_data = generate_lorenz_data(num_points, sampling_rate, initial_state, period)
 
 # Speichern des Datensatzes in einer CSV-Datei
-file_path = "lorenz_system_data.csv"
+file_path = "/Users/Aleksandar/Documents/Uni/FP/Modeling_Dynamic_Systems/DynSys_and_DataSets/lorenz_system/lorenz_system_data.csv"
 lorenz_data.to_csv(file_path, index=False)
 print(f"Dataset saved to {file_path}'.")
 

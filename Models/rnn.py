@@ -14,8 +14,6 @@ import matplotlib.pyplot as plt
 import json
 from datetime import datetime
 
-device = "cuda" if torch.cuda.is_available() else "cpu"
-print(f"Using '{device}' device")
 
 class RNN(nn.Module):
 
@@ -34,7 +32,7 @@ class RNN(nn.Module):
         out: batch_size, sequence_length, hidden_size
         hidden_state : num_layers, batch_size, hidden_size
         """ 
-        h0 = torch.zeros(self.num_layers, x.size(0), self.hidden_size).to(device)
+        h0 = torch.zeros(self.num_layers, x.size(0), self.hidden_size).to("mps")
         outputs = []
         out, h = self.rnn(x, h0) # pass trough RNN
 
@@ -98,7 +96,6 @@ class TimeSeriesDataset(Dataset):
         # Return a single sample (input, target)
         return self.X[index], self.Y[index]
         
-
 def create_dataloader(file_path, batch_size, sequence_length, shuffle=False):
     """
     Creates a DataLoader from the given file path.
@@ -106,7 +103,6 @@ def create_dataloader(file_path, batch_size, sequence_length, shuffle=False):
     dataset = TimeSeriesDataset(file_path, sequence_length)
 
     return DataLoader(dataset, batch_size=batch_size, shuffle=shuffle, drop_last=True)
-
 
 def split_and_normalize_dataset(file_path, train_ratio=0.7, val_ratio = 0.15):
 
@@ -133,7 +129,7 @@ def split_and_normalize_dataset(file_path, train_ratio=0.7, val_ratio = 0.15):
     return normalized_train_data, normalized_val_data, normalized_test_data
 
 # Train Function
-def train(model, dataloader, future_steps,loss_fn):
+def train(model, data, optimizer, future_steps, loss_fn):
 
     if torch.cuda.is_available():
         device = "cuda"
@@ -149,7 +145,7 @@ def train(model, dataloader, future_steps,loss_fn):
     batch_losses=list()
 
    
-    for X, Y in dataloader:  # X, Y are batches
+    for X, Y in data:  # X, Y are batches
         
         # Send tensors to the device
         X, Y = X.to(device), Y.to(device)
@@ -157,7 +153,7 @@ def train(model, dataloader, future_steps,loss_fn):
         # Clear gradients
         optimizer.zero_grad()
 
-        prediction = model(X, future_steps)
+        prediction = model(X,future_steps)
         loss = loss_fn(prediction, Y)
         # prediction of shape (batch_size, future_steps, output_size=features)
         # Y of shape (batch_size, future_steps, output_size=features)        
@@ -171,7 +167,7 @@ def train(model, dataloader, future_steps,loss_fn):
     return train_loss
 
 
-def validation(model, dataloader, future_steps,loss_fn):
+def validation(model, dataloader, future_steps, loss_fn):
     """
     Evaluates the model on the given dataloader and calculates the average loss.
     
@@ -201,8 +197,8 @@ def validation(model, dataloader, future_steps,loss_fn):
         for X, Y in dataloader:  # Iterate over batches
             X, Y = X.to(device), Y.to(device)
             
-            prediction = model(X, future_steps)
-            loss = loss_fn(prediction, Y)
+            predictions = model(X, future_steps)
+            loss = loss_fn(predictions, Y)
             all_losses.append(loss.item())
 
     val_loss = np.mean(all_losses)  # Calculate the average loss
@@ -239,8 +235,8 @@ def test(model, dataloader, future_steps,loss_fn):
         for X, Y in dataloader:  # Iterate over batches
             X, Y = X.to(device), Y.to(device)
             
-            prediction = model(X, future_steps)
-            loss = loss_fn(prediction, Y)
+            predictions = model(X, future_steps)
+            loss = loss_fn(predictions, Y)
             all_losses.append(loss.item())
 
     test_loss = np.mean(all_losses)  # Calculate the average loss
@@ -248,7 +244,7 @@ def test(model, dataloader, future_steps,loss_fn):
 
     return  test_loss
 
-def plot_predictions(model, data, sequence_length, future_steps):
+def plot_predictions(model, data, sequence_length):
     if torch.cuda.is_available():
         device = "cuda"
     elif  torch.backends.mps.is_available():
@@ -261,6 +257,7 @@ def plot_predictions(model, data, sequence_length, future_steps):
     model.eval()  # Set model to evaluation mode
 
     # Select a random starting point for the sequence
+    
     start_idx = random.randint(0, len(data) - sequence_length - 1)
     input_sequence = data[start_idx:start_idx + sequence_length].unsqueeze(0).to(device)  # Add batch dimension
 
@@ -270,7 +267,7 @@ def plot_predictions(model, data, sequence_length, future_steps):
 
     # Predict future steps
     with torch.no_grad():
-        predicted_future = model(input_sequence).squeeze(0)  # Remove batch dimension
+        predicted_future = model(input_sequence, sequence_length).squeeze(0)  # Remove batch dimension
 
     
     # Convert tensors to lists for plotting
@@ -282,14 +279,14 @@ def plot_predictions(model, data, sequence_length, future_steps):
     plt.figure(figsize=(12, 6))
 
     # Plot x
-    plt.subplot(3, 1, 1)
+    plt.subplot(2, 1, 1)
     plt.plot(time_steps, [x[0] for x in actual_future], label='Actual Future')
     plt.plot(time_steps, [x[0] for x in predicted_future], label='Predicted Future')
     plt.title('X')
     plt.legend()
 
     # Plot y
-    plt.subplot(3, 1, 2)
+    plt.subplot(2, 1, 2)
     plt.plot(time_steps, [x[1] for x in actual_future], label='Actual Future')
     plt.plot(time_steps, [x[1] for x in predicted_future], label='Predicted Future')
     plt.title('Y')
@@ -309,8 +306,12 @@ def plot_predictions(model, data, sequence_length, future_steps):
     fig = plt.figure(figsize=(10, 8))
     ax = fig.add_subplot(111, projection='3d')
 
+    #ax.plot([x[0] for x in actual_future], [x[1] for x in actual_future], label='Actual Future', color='b')
+    #ax.plot([x[0] for x in predicted_future], [x[1] for x in predicted_future], label='Predicted Future', color='r', linestyle='--')
     ax.plot([x[0] for x in actual_future], [x[1] for x in actual_future], [x[2] for x in actual_future], label='Actual Future', color='b')
     ax.plot([x[0] for x in predicted_future], [x[1] for x in predicted_future], [x[2] for x in predicted_future], label='Predicted Future', color='r', linestyle='--')
+
+    ax.set_xlabel('X')
 
     ax.set_xlabel('X')
     ax.set_ylabel('Y')
@@ -321,6 +322,27 @@ def plot_predictions(model, data, sequence_length, future_steps):
     plt.show()
 
 
+
+
+
+class CosineWarmupScheduler(optim.lr_scheduler._LRScheduler):
+
+    def __init__(self, optimizer, warmup, max_iters):
+        self.warmup = warmup
+        self.max_num_iters = max_iters
+        super().__init__(optimizer)
+
+    def get_lr(self):
+        lr_factor = self.get_lr_factor(epoch=self.last_epoch)
+        return [base_lr * lr_factor for base_lr in self.base_lrs]
+
+    def get_lr_factor(self, epoch):
+        lr_factor = 0.5 * (1 + np.cos(np.pi * epoch / self.max_num_iters))
+        if epoch <= self.warmup:
+            lr_factor *= epoch * 1.0 / self.warmup
+        return lr_factor
+    
+
 def full_training(sys, dataset_path, sequence_length, future_steps):
     
     batch_size = sys["batch_size"]
@@ -330,7 +352,7 @@ def full_training(sys, dataset_path, sequence_length, future_steps):
     output_size = sys["output_size"]
     learning_rate = sys["learning_rate"]
     num_layers = sys["num_layers"]
-    patience = system["patience"]
+    #patience = system["patience"]
     val_losses=list()
     training_losses = list()
     best_loss = float("inf")
@@ -385,17 +407,26 @@ def full_training(sys, dataset_path, sequence_length, future_steps):
 
 if __name__ == "__main__":
 
-    sequence_length = 28  # Eingabelänge (Anzahl Zeitpunkte)
+    sequence_length = 50  # Eingabelänge (Anzahl Zeitpunkte)
     future_steps = sequence_length     # Anzahl der vorherzusagenden Schritte
     batch_size = 128
-    epochs = 200
+    epochs = 40
     hidden_size = 80
     input_size = 3
     output_size = 3
     learning_rate = 0.001
     num_layers = 2
 
-    file_path = "/Users/Aleksandar/Documents/Uni/FP/Modeling_Dynamic_Systems/DynSys_and_DataSets/lorenz_system/lorenz_system_data_5.csv"
+        # Your existing code
+
+    dim_feedforward = 64
+    num_layers = 1
+    dropout = 0.0
+    input_dropout = 0.0
+    learning_rate = 0.001
+
+    # Load and preprocess data
+    file_path = '/Users/Aleksandar/Documents/Uni/FP/Modeling_Dynamic_Systems/DynSys_and_DataSets/lorenz_system/lorenz_system_data.csv'
     train_data, val_data, test_data = split_and_normalize_dataset(file_path)
 
     # Create dataloaders
@@ -409,9 +440,12 @@ if __name__ == "__main__":
     # Initialize the optimizer
     optimizer = optim.Adam(model.parameters(), lr=learning_rate)
 
+    # Initialize the scheduler
+    scheduler = CosineWarmupScheduler(optimizer, warmup=10, max_iters=epochs)
+
     # Loss function
     loss_fn = nn.MSELoss()
-    patience_start = 50
+    patience_start = 40
     if patience_start > epochs:
         patience_start = epochs
     else:
@@ -421,14 +455,13 @@ if __name__ == "__main__":
     val_losses = []
     best_loss = float("inf")
 
-
     for epoch in range(epochs):
         # Train the model
-        train_results = train(model, train_loader, optimizer, loss_fn)
+        train_results = train(model, train_loader, optimizer,future_steps, loss_fn)
         training_losses.append(train_results)
 
         # Evaluate the model
-        val_results = validation(model, val_loader, loss_fn)
+        val_results = validation(model, val_loader,future_steps, loss_fn)
         val_losses.append(val_results)
         if (epoch + 1) % 10 == 0:
             print(f"Epoch: {epoch + 1} Train Loss: {train_results}, Validation Loss: {val_results}")
@@ -438,86 +471,28 @@ if __name__ == "__main__":
             patience = patience_start  # Reset patience counter
         else:
             patience -= 1
-        if patience == 0 or epoch == epochs - 1:
+        if patience == 0 :
             best_training_loss = training_losses[-start_point]
             best_val_loss = val_losses[-start_point]
-            test_loss = test(model, test_loader, loss_fn)
+            test_loss = test(model, test_loader,future_steps, loss_fn)
             print("test_loss:", test_loss)
             print(f"Best Train Loss: {best_training_loss}, Best Val Loss: {best_val_loss}")
-            plot_predictions(model, test_loader, sequence_length,sequence_length)
+            break 
+        if epoch == epochs - 1 :
+            best_training_loss = training_losses[patience-start_point]
+            best_val_loss = val_losses[patience-start_point]
+            test_loss = test(model, test_loader,future_steps, loss_fn)
+            print("test_loss:", test_loss)
+            print(f"Best Train Loss: {best_training_loss}, Best Val Loss: {best_val_loss}")
             break 
 
+
+        # Step the scheduler
+        scheduler.step()
+
+    plot_predictions(model, test_data, sequence_length)
     
 
-
-    """ # Hyperparameter
-    sequence_length = 60  # Eingabelänge (Anzahl Zeitpunkte)
-    future_steps = 10     # Anzahl der vorherzusagenden Schritte
-    batch_size = 256
-    epochs = 20
-    hidden_size = 80
-    input_size = 3
-    output_size = 3
-    learning_rate = 0.0001
-    num_layers = 2
-    start_point=230
-   
-
-    
-
-    dataset_path = "D:\Master_EI\FP\Modeling_Dynamic_Systems\lorenz_attractor_dataset.csv"
-    
-
-
-    # lies confin ein
-    config_path = os.path.join( os.getcwd(),"RNN_config.json")
-
-    with open(config_path, 'r') as file:
-        config = json.load(file)
-
-    # Hyperparameter
-
-    for system in config:
-
-
-        dataset = Path(system["dataset"])
-        
-        
-        result_file = os.path.join(os.getcwd(), system["system_name"])
-
-        
-        training_results.append(system)
-        all_sets_results= list()
-
-        for set in dataset:
-            
-            one_set_results = list()
-
-            if not set.endswith('.csv'):
-                continue
-            
-            for sequence_len, future_len in zip(system["sequence_length"],system["sequence_out"]):
-
-                training_results = dict()
-
-                trainig_res, val_res, train_time = full_training(system, set, sequence_len, future_len)
-
-                training_results["sequence_len"] = sequence_len
-                training_results["future_len"] = future_len
-                training_results["trainig_res"] = trainig_res
-                training_results["val_res"] = val_res
-                training_results["train_time"] = train_time
-
-                one_set_results.append(training_results)
-
-            all_sets_results.append(one_set_results)
-
-        training_results.append(all_sets_results)
-            
-        with open(result_file, 'w') as json_file:
-            json.dump(training_results, json_file)
-                
-        """
 
 
 

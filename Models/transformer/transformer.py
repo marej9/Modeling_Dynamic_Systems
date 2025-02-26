@@ -25,7 +25,7 @@ import torch.nn as nn
 import torch.nn.functional as F
 import torch.utils.data as data
 import torch.optim as optim
-
+import time
 import optuna
 
 
@@ -308,29 +308,49 @@ def create_dataloader(file_path, batch_size, sequence_length, shuffle=False):
 
     return DataLoader(dataset, batch_size=batch_size, shuffle=shuffle, drop_last=True)
 
-def split_and_normalize_dataset(file_path, train_ratio=0.7, val_ratio = 0.15):
-
+def split_and_normalize_dataset(file_path, train_ratio=0.7, val_ratio=0.15, test_ratio=0.15):
     data = pd.read_csv(file_path).iloc[1:, 1:].values
     data = torch.tensor(data, dtype=torch.float32)
 
-    dataset_size = len(data) 
+    dataset_size = len(data)
     train_size = int(train_ratio * dataset_size)
-    val_size =  int(val_ratio * dataset_size)
-    
-    train_data = data[:train_size]
-    val_data = data[train_size:train_size + val_size]
-    test_data = data[train_size+val_size:]
+    val_size = int(val_ratio * dataset_size)
+    test_size = dataset_size - train_size - val_size
 
-    #compute mean and standard deviation over features (columns)
-    train_mean = train_data.mean(dim=0)
-    train_std = train_data.std(dim=0)
+    # Define the 6 different combinations of slices
+    combinations = [
+        (slice(0, train_size), slice(train_size, train_size + val_size), slice(train_size + val_size, dataset_size)),
 
-    # Apply normalization
-    normalized_train_data = (train_data - train_mean) / train_std
-    normalized_val_data = (val_data - train_mean) / train_std
-    normalized_test_data = (test_data - train_mean) / train_std
+        (slice(val_size, val_size + train_size), slice(0, val_size),  slice(val_size + train_size, dataset_size)),
 
-    return normalized_train_data, normalized_val_data, normalized_test_data
+        (slice(test_size, test_size + train_size), slice(test_size + train_size, dataset_size), slice(0, test_size)),
+
+        (slice(0, train_size), slice(train_size, train_size + test_size), slice(train_size + test_size, dataset_size)),
+
+        (slice(val_size + test_size, dataset_size), slice(0, val_size), slice(val_size, val_size + test_size)),
+
+        (slice(test_size + val_size, dataset_size), slice(test_size, test_size + val_size), slice(0, test_size))
+    ]
+
+    results = []
+    for train_slice, val_slice, test_slice in combinations:
+        train_data = data[train_slice]
+        val_data = data[val_slice]
+        test_data = data[test_slice]
+
+        # Compute mean and standard deviation over features (columns)
+        train_mean = train_data.mean(dim=0)
+        train_std = train_data.std(dim=0)
+
+        # Apply normalization
+        normalized_train_data = (train_data - train_mean) / train_std
+        normalized_val_data = (val_data - train_mean) / train_std
+        normalized_test_data = (test_data - train_mean) / train_std
+
+        results.append([normalized_train_data, normalized_val_data, normalized_test_data])
+
+    return results
+
 
 # Train Function
 def train(model, data, optimizer, loss_fn):
@@ -448,6 +468,37 @@ def test(model, dataloader, loss_fn):
 
     return  test_loss
 
+
+def seq_prediction(model, data, sequence_length, future_steps):
+    # Geräteauswahl
+    if torch.cuda.is_available():
+        device = torch.device("cuda")
+    elif torch.backends.mps.is_available():
+        device = torch.device("mps")
+    else:
+        device = torch.device("cpu")
+    
+    model.to(device)
+    model.eval()  # Modell in den Evaluierungsmodus versetzen
+
+    # Zufälligen Startpunkt für die Sequenz auswählen
+    start_idx = random.randint(0, len(data) - sequence_length - future_steps - 1)
+    input_sequence = data[start_idx:start_idx + sequence_length].unsqueeze(0).to(device)  # Batch-Dimension hinzufügen
+
+    # Tatsächliche zukünftige Schritte erhalten
+    actual_future = data[start_idx + sequence_length:start_idx + sequence_length + future_steps].to(device)
+
+    # Zukünftige Schritte vorhersagen
+    with torch.no_grad():
+        predicted_future = model(input_sequence).squeeze(0)  # Batch-Dimension entfernen
+
+    # Tensoren in Listen für die Darstellung umwandeln
+    actual_future = actual_future.cpu().tolist()
+    predicted_future = predicted_future.cpu().tolist()
+    
+    return predicted_future, actual_future
+
+
 def plot_predictions(model, data, sequence_length, future_steps):
     if torch.cuda.is_available():
         device = "cuda"
@@ -529,77 +580,140 @@ def plot_predictions(model, data, sequence_length, future_steps):
 
 
 
+
+def save_training_results(file_path, batch_size, epochs, input_dim, model_dim, embed_dim, num_heads,
+                          dim_feedforward, num_layers, dropout, input_dropout, learning_rate, sequence_lengths):
+    # Load and preprocess data
+    dataset_combination = split_and_normalize_dataset(file_path)
+    
+    # Initialize results dictionary
+    results = {
+        "hyperparameters": {
+            "batch_size": batch_size,
+            "sequence_length": sequence_lengths,
+            "epochs": epochs,
+            "input_dim": input_dim,
+            "model_dim": model_dim,
+            "embed_dim": embed_dim,
+            "num_heads": num_heads,
+            "dim_feedforward": dim_feedforward,
+            "num_layers": num_layers,
+            "dropout": dropout,
+            "input_dropout": input_dropout,
+            "learning_rate": learning_rate
+        },
+        "training_results": []
+    }
+
+    for i, (train_data, val_data, test_data) in enumerate(dataset_combination):
+        for sequence in sequence_lengths:
+            # Initialize the model
+            train_loader = create_dataloader(train_data, batch_size, sequence, shuffle=False)
+            val_loader = create_dataloader(val_data, batch_size, sequence, shuffle=False)
+            test_loader = create_dataloader(test_data, batch_size, sequence, shuffle=False)
+            model = TransformerPredictor(input_dim, model_dim, num_heads, dim_feedforward, num_layers, dropout, input_dropout)
+
+            # Initialize the optimizer
+            optimizer = optim.Adam(model.parameters(), lr=learning_rate)
+
+            # Initialize the scheduler
+            scheduler = CosineWarmupScheduler(optimizer, warmup=10, max_iters=epochs)
+
+            # Loss function
+            loss_fn = nn.MSELoss()
+            patience_start = 50
+            if patience_start > epochs:
+                patience_start = epochs
+            else:
+                patience_start = 50
+            start_point = patience_start
+            training_losses = []
+            val_losses = []
+            best_loss = float("inf")
+            best_epoch = 0
+
+            start_time = time.time()
+            
+            for epoch in range(epochs):
+                # Train the model
+                train_results = train(model, train_loader, optimizer, loss_fn)
+                training_losses.append(train_results)
+
+                # Evaluate the model
+                val_results = validation(model, val_loader, loss_fn)
+                val_losses.append(val_results)
+                if (epoch + 1) % 10 == 0:
+                    print(f"Epoch: {epoch + 1} Train Loss: {train_results}, Validation Loss: {val_results}")
+
+                if val_results < best_loss:
+                    best_loss = val_results
+                    patience = patience_start  # Reset patience counter
+                else:
+                    patience -= 1
+                if patience == 0:
+                    best_training_loss = training_losses[-start_point]
+                    best_val_loss = val_losses[-start_point]
+                    test_loss = test(model, test_loader, loss_fn)
+                    print("test_loss:", test_loss)
+                    print(f"Best Train Loss: {best_training_loss}, Best Val Loss: {best_val_loss}")
+                    best_epoch = epoch +1
+                    break 
+
+                elif epoch == epochs - 1:
+                    best_training_loss = training_losses[-patience]
+                    best_val_loss = val_losses[-patience]
+                    test_loss = test(model, test_loader, loss_fn)
+                    print("test_loss:", test_loss)
+                    print(f"Best Train Loss: {best_training_loss}, Best Val Loss: {best_val_loss}")
+                    best_epoch = epoch +1
+                    break 
+                # Step the scheduler
+                scheduler.step()
+            
+            end_time = time.time()
+            
+            predicted_sequence, true_sequence  = seq_prediction(model, test_data, sequence, sequence)
+            
+            training_result = {
+                "combination_index": i + 1,
+                "sequence_length": sequence,
+                "training_time": end_time - start_time,
+                "best_training_loss": best_training_loss,
+                "best_val_loss": best_val_loss,
+                "test_loss": test_loss,
+                "best_epoch": best_epoch,
+                "predicted_sequence": predicted_sequence,
+                "true_sequence": true_sequence
+            }
+            
+            results["training_results"].append(training_result)
+    
+    # Save results to JSON file in the same folder as the dataset file
+    folder_path = os.path.dirname(file_path)
+    json_file_path = os.path.join(folder_path, 'training_results.json')
+    
+    with open(json_file_path, 'w') as json_file:
+        json.dump(results, json_file, indent=4)
+
 if __name__ == "__main__":
-        # Your existing code
+    # Example usage
+    file_path = '/Users/Aleksandar/Documents/Uni/FP/Modeling_Dynamic_Systems/DynSys_and_DataSets/lorenz_system/lorenz_system_data.csv'
     batch_size = 64
-    sequence_length = 80
-    epochs = 30
-    input_dim = 2  # Number of features
+    epochs = 400
+    input_dim = 3  # Number of features
     model_dim = 64
     embed_dim = model_dim
     num_heads = 2
 
-    dim_feedforward = 64
-    num_layers = 1
-    dropout = 0.0
-    input_dropout = 0.0
+    dim_feedforward = 128
+    num_layers = 8
+    dropout = 0.1
+    input_dropout = 0.1
     learning_rate = 0.001
 
-    # Load and preprocess data
-    file_path = '/Users/Aleksandar/Documents/Uni/FP/Modeling_Dynamic_Systems/Models/van_der_pol_stochastic_data.csv'
-    train_data, val_data, test_data = split_and_normalize_dataset(file_path)
+    sequence_lengths = [0.5, 1.0, 2.0, 5.0]
+    sequence_lengths = [int(x * 50) for x in sequence_lengths]
 
-    # Create dataloaders
-    train_loader = create_dataloader(train_data, batch_size, sequence_length, shuffle=False)
-    val_loader = create_dataloader(val_data, batch_size, sequence_length, shuffle=False)
-    test_loader = create_dataloader(test_data, batch_size, sequence_length, shuffle=False)
-
-    # Initialize the model
-    model = TransformerPredictor(input_dim, model_dim, num_heads, dim_feedforward, num_layers, dropout, input_dropout)
-
-    # Initialize the optimizer
-    optimizer = optim.Adam(model.parameters(), lr=learning_rate)
-
-    # Initialize the scheduler
-    scheduler = CosineWarmupScheduler(optimizer, warmup=10, max_iters=epochs)
-
-    # Loss function
-    loss_fn = nn.MSELoss()
-    patience_start = 50
-    if patience_start > epochs:
-        patience_start = epochs
-    else:
-        patience_start = 50
-    start_point = patience_start
-    training_losses = []
-    val_losses = []
-    best_loss = float("inf")
-
-    for epoch in range(epochs):
-        # Train the model
-        train_results = train(model, train_loader, optimizer, loss_fn)
-        training_losses.append(train_results)
-
-        # Evaluate the model
-        val_results = validation(model, val_loader, loss_fn)
-        val_losses.append(val_results)
-        if (epoch + 1) % 10 == 0:
-            print(f"Epoch: {epoch + 1} Train Loss: {train_results}, Validation Loss: {val_results}")
-
-        if val_results < best_loss:
-            best_loss = val_results
-            patience = patience_start  # Reset patience counter
-        else:
-            patience -= 1
-        if patience == 0 or epoch == epochs - 1:
-            best_training_loss = training_losses[-start_point]
-            best_val_loss = val_losses[-start_point]
-            test_loss = test(model, test_loader, loss_fn)
-            print("test_loss:", test_loss)
-            print(f"Best Train Loss: {best_training_loss}, Best Val Loss: {best_val_loss}")
-            break 
-
-        # Step the scheduler
-        scheduler.step()
-
-    plot_predictions(model, test_data, sequence_length, sequence_length)
+    save_training_results(file_path, batch_size, epochs, input_dim, model_dim, embed_dim, num_heads,
+                        dim_feedforward, num_layers, dropout, input_dropout, learning_rate, sequence_lengths)
+            

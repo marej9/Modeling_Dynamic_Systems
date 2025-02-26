@@ -523,18 +523,17 @@ def plot_predictions(model, data, sequence_length, future_steps):
 
 
 
-
 def objective(trial, file_path, sequence_length):
     # Initialize test_loss
     test_loss = None
     batch_size = trial.suggest_categorical('batch_size', [8, 16, 32, 64, 128])
-    epochs=2
-    #epochs = trial.suggest_int('epochs', 60, 400, step = 20)
+    epochs = trial.suggest_int('epochs', 80, 300, step = 20)
+    # epochs = trial.suggest_int('epochs', 60, 400, step=20)
     input_dim = 3  # Number of features
     model_dim = trial.suggest_int('model_dim', 16, 128, step=2)
     embed_dim = model_dim
     num_heads = trial.suggest_categorical("num_heads", [1, 2])
-    dim_feedforward = trial.suggest_int('dim_feed_forward', 4, 256)
+    dim_feedforward = trial.suggest_int('dim_feedforward', 4, 256)
     num_layers = trial.suggest_int('num_layers', 2, 16)
     dropout = trial.suggest_float("dropout", 0.0, 0.1)
     input_dropout = trial.suggest_float("input_dropout", 0.0, 0.1)
@@ -551,7 +550,7 @@ def objective(trial, file_path, sequence_length):
     # Initialize the model
     model = TransformerPredictor(input_dim, model_dim, num_heads, dim_feedforward, num_layers, dropout, input_dropout)
 
-     # Initialize the optimizer
+    # Initialize the optimizer
     optimizer = optim.Adam(model.parameters(), lr=learning_rate)
 
     # Initialize the scheduler
@@ -569,6 +568,7 @@ def objective(trial, file_path, sequence_length):
     training_losses = []
     val_losses = []
     best_loss = float("inf")
+    best_epoch = 0  # Variable to store the best epoch
 
     for epoch in range(epochs):
         # Train the model
@@ -578,25 +578,26 @@ def objective(trial, file_path, sequence_length):
         # Evaluate the model
         val_results = validation(model, val_loader, loss_fn)
         val_losses.append(val_results)
+        if (epoch + 1) % 10 == 0:
+            print(f"Epoch: {epoch + 1} Train Loss: {train_results}, Validation Loss: {val_results}")
 
-        test_loss = test(model, test_loader, loss_fn)
-        test_losses.append(test_loss)
-        
         if val_results < best_loss:
             best_loss = val_results
             patience = patience_start  # Reset patience counter
+            best_epoch = epoch + 1  # Store the best epoch
         else:
             patience -= 1
-        if patience == 0 or epoch == epochs - 1:
+        if patience == 0:
             best_val_loss = val_losses[-start_point]
-
             break 
 
+        elif epoch == epochs - 1:
+            best_val_loss = val_losses[-patience]
+            break 
         # Step the scheduler
         scheduler.step()
-            
-  
-    return best_val_loss
+    
+    return best_val_loss, best_epoch
 
 def optimize_for_datasets(dataset_paths, sequence_lengths):
     results = {}
@@ -609,16 +610,15 @@ def optimize_for_datasets(dataset_paths, sequence_lengths):
             end_time = time.time()  # Record the end time
 
             best_params = study.best_params
-            best_val_loss = study.best_value  # Get the best validation loss
+            best_val_loss, best_epoch = study.best_trial.values  # Get the best validation loss and epoch
             best_params["best_val_loss"] = best_val_loss  # Add the best validation loss to the parameters
+            best_params["best_epoch"] = best_epoch  # Add the best epoch to the parameters
             best_params["sequence_length"] = sequence_length  # Add the sequence length to the parameters
             best_params["optimization_time"] = end_time - start_time  # Add the optimization time to the parameters
             results[f"{file_path}_seq_len_{sequence_length}"] = best_params
 
-    with open('all_best_hyperparams.json', 'w') as f:
+    with open('/Users/Aleksandar/Documents/Uni/FP/Modeling_Dynamic_Systems/DynSys_and_DataSets/lorenz_system/all_best_hyperparams.json', 'w') as f:
         json.dump(results, f)
-
-    print("Beste Parameter für alle Datasets und Sequenzlängen:", results)
 
 if __name__ == "__main__":
     dataset_paths = [
