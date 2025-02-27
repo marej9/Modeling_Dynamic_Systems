@@ -13,7 +13,7 @@ import pandas as pd
 import matplotlib.pyplot as plt
 import json
 from datetime import datetime
-
+import time
 
 class RNN(nn.Module):
 
@@ -22,9 +22,12 @@ class RNN(nn.Module):
         self.num_layers = num_layers
         self.hidden_size = hidden_size
         self.rnn = nn.RNN(input_size, hidden_size, num_layers, batch_first= True)
-        self.fc = nn.Linear(hidden_size, num_classes)
+        self.fc1 = nn.Linear(hidden_size, int(hidden_size/2))
+        self.relu1=nn.ReLU()
+        self.fc2 = nn.Linear(int(hidden_size/2), num_classes)
 
-    def forward(self, x, future_steps):
+
+    def forward(self, x):
         """
         Forward Pass
         x: (batch_size, sequence_length, input_size)
@@ -32,21 +35,12 @@ class RNN(nn.Module):
         out: batch_size, sequence_length, hidden_size
         hidden_state : num_layers, batch_size, hidden_size
         """ 
-        h0 = torch.zeros(self.num_layers, x.size(0), self.hidden_size).to("mps")
-        outputs = []
-        out, h = self.rnn(x, h0) # pass trough RNN
-
-        out = self.fc(out[:, -1, :]) # initial output from last time step, Extrahiert den Hidden State des letzten Zeitschritts der Sequenz für jeden Batch.
-        outputs.append(out)
         
-        for _ in range(future_steps - 1): # iterative prediction for future steps
-            out, h = self.rnn(out.unsqueeze(1), h)
-            out = self.fc(out[:, -1, :])
-            
-            outputs.append(out)
+        h0 = torch.zeros(self.num_layers, x.size(0), self.hidden_size).to("mps")
+        out, _ = self.rnn(x, h0)
+        out = self.fc(out)
 
-        return torch.stack(outputs, dim=1) # combine output : (batch_size, future_steps, num_classes)
-     
+        return out
 
     
 
@@ -104,7 +98,52 @@ def create_dataloader(file_path, batch_size, sequence_length, shuffle=False):
 
     return DataLoader(dataset, batch_size=batch_size, shuffle=shuffle, drop_last=True)
 
-def split_and_normalize_dataset(file_path, train_ratio=0.7, val_ratio = 0.15):
+def split_and_normalize_dataset(file_path, train_ratio=0.7, val_ratio=0.15, test_ratio=0.15):
+    data = pd.read_csv(file_path).iloc[1:, 1:].values
+    data = torch.tensor(data, dtype=torch.float32)
+
+    dataset_size = len(data)
+    train_size = int(train_ratio * dataset_size)
+    val_size = int(val_ratio * dataset_size)
+    test_size = dataset_size - train_size - val_size
+
+    # Define the 6 different combinations of slices
+    combinations = [
+        (slice(0, train_size), slice(train_size, train_size + val_size), slice(train_size + val_size, dataset_size)),
+
+        (slice(val_size, val_size + train_size), slice(0, val_size),  slice(val_size + train_size, dataset_size)),
+
+        (slice(test_size, test_size + train_size), slice(test_size + train_size, dataset_size), slice(0, test_size)),
+
+        (slice(0, train_size), slice(train_size, train_size + test_size), slice(train_size + test_size, dataset_size)),
+
+        (slice(val_size + test_size, dataset_size), slice(0, val_size), slice(val_size, val_size + test_size)),
+
+        (slice(test_size + val_size, dataset_size), slice(test_size, test_size + val_size), slice(0, test_size))
+    ]
+
+    results = []
+    for train_slice, val_slice, test_slice in combinations:
+        train_data = data[train_slice]
+        val_data = data[val_slice]
+        test_data = data[test_slice]
+
+        # Compute mean and standard deviation over features (columns)
+        train_mean = train_data.mean(dim=0)
+        train_std = train_data.std(dim=0)
+
+        # Apply normalization
+        normalized_train_data = (train_data - train_mean) / train_std
+        normalized_val_data = (val_data - train_mean) / train_std
+        normalized_test_data = (test_data - train_mean) / train_std
+
+        results.append([normalized_train_data, normalized_val_data, normalized_test_data])
+
+    return results
+
+
+
+"""def split_and_normalize_dataset(file_path, train_ratio=0.7, val_ratio = 0.15):
 
     data = pd.read_csv(file_path).iloc[1:, 1:].values
     data = torch.tensor(data, dtype=torch.float32)
@@ -127,7 +166,7 @@ def split_and_normalize_dataset(file_path, train_ratio=0.7, val_ratio = 0.15):
     normalized_test_data = (test_data - train_mean) / train_std
 
     return normalized_train_data, normalized_val_data, normalized_test_data
-
+"""
 # Train Function
 def train(model, data, optimizer, future_steps, loss_fn):
 
@@ -153,7 +192,7 @@ def train(model, data, optimizer, future_steps, loss_fn):
         # Clear gradients
         optimizer.zero_grad()
 
-        prediction = model(X,future_steps)
+        prediction = model(X)
         loss = loss_fn(prediction, Y)
         # prediction of shape (batch_size, future_steps, output_size=features)
         # Y of shape (batch_size, future_steps, output_size=features)        
@@ -197,7 +236,7 @@ def validation(model, dataloader, future_steps, loss_fn):
         for X, Y in dataloader:  # Iterate over batches
             X, Y = X.to(device), Y.to(device)
             
-            predictions = model(X, future_steps)
+            predictions = model(X)
             loss = loss_fn(predictions, Y)
             all_losses.append(loss.item())
 
@@ -235,7 +274,7 @@ def test(model, dataloader, future_steps,loss_fn):
         for X, Y in dataloader:  # Iterate over batches
             X, Y = X.to(device), Y.to(device)
             
-            predictions = model(X, future_steps)
+            predictions = model(X)
             loss = loss_fn(predictions, Y)
             all_losses.append(loss.item())
 
@@ -342,156 +381,162 @@ class CosineWarmupScheduler(optim.lr_scheduler._LRScheduler):
             lr_factor *= epoch * 1.0 / self.warmup
         return lr_factor
     
-
-def full_training(sys, dataset_path, sequence_length, future_steps):
     
-    batch_size = sys["batch_size"]
-    epochs = sys["epochs"]
-    hidden_size = sys["hidden_size"]
-    input_size = sys["input_size"]
-    output_size = sys["output_size"]
-    learning_rate = sys["learning_rate"]
-    num_layers = sys["num_layers"]
-    #patience = system["patience"]
-    val_losses=list()
-    training_losses = list()
-    best_loss = float("inf")
-    patience_start = patience
-    #split dataset 
+def seq_prediction(model, data, sequence_length, future_steps):
+    # Geräteauswahl
+    if torch.cuda.is_available():
+        device = torch.device("cuda")
+    elif torch.backends.mps.is_available():
+        device = torch.device("mps")
+    else:
+        device = torch.device("cpu")
     
-    training_dataset, test_dataset = split_and_normalize_dataset(dataset_path, 0.7)
+    model.to(device)
+    model.eval()  # Modell in den Evaluierungsmodus versetzen
 
-    # DataLoader mit Sequenzlänge und Zukunftsschritten
-    dataloader_training = create_dataloader(training_dataset, batch_size, sequence_length, future_steps)
-    dataloader_evaluate = create_dataloader(test_dataset, batch_size, sequence_length, future_steps)
-    # Modell initialisieren
-    model = RNN(input_size=input_size, hidden_size=hidden_size, num_layers=num_layers, num_classes=output_size).to(device)
-    optimizer = optim.Adam(model.parameters(), lr=learning_rate)
-    loss_fn = nn.MSELoss()
+    # Zufälligen Startpunkt für die Sequenz auswählen
+    start_idx = random.randint(0, len(data) - sequence_length - future_steps - 1)
+    input_sequence = data[start_idx:start_idx + sequence_length].unsqueeze(0).to(device)  # Batch-Dimension hinzufügen
+
+    # Tatsächliche zukünftige Schritte erhalten
+    actual_future = data[start_idx + sequence_length:start_idx + sequence_length + future_steps].to(device)
+
+    # Zukünftige Schritte vorhersagen
+    with torch.no_grad():
+        predicted_future = model(input_sequence).squeeze(0)  # Batch-Dimension entfernen
+
+    # Tensoren in Listen für die Darstellung umwandeln
+    actual_future = actual_future.cpu().tolist()
+    predicted_future = predicted_future.cpu().tolist()
+    
+    return predicted_future, actual_future
 
 
-    start_training_time = datetime.now()
 
-    for epoch in range(epochs):
-        
-        # Training
-        training_loss = train(model, dataloader_training, optimizer, loss_fn, future_steps=future_steps) 
-        training_losses.append(training_loss)
-        #evaluation   
-        val_loss = validation(model, dataloader_evaluate, loss_fn, future_steps=future_steps)   
-        val_losses.append(val_loss)
+def save_training_results(file_path, batch_size, epochs, input_dim, hidden_size, num_layers, dropout, learning_rate, sequence_lengths):
+    # Load and preprocess data
+    dataset_combination = split_and_normalize_dataset(file_path)
+    
+    # Initialize results dictionary
+    results = {
+        "hyperparameters": {
+            "batch_size": batch_size,
+            "sequence_length": sequence_lengths,
+            "epochs": epochs,
+            "input_dim": input_dim,
+            "hidden_size": hidden_size,
+            "num_layers": num_layers,
+            "dropout": dropout,
+            "learning_rate": learning_rate
+        },
+        "training_results": []
+    }
 
-        if (epoch +1) % 10 == 0: 
-            print(f"=> Epoch: {epoch + 1}/{epochs}, Training_loss: {training_loss:.6f}, val_loss: {val_loss:.6f}") 
+    for i, (train_data, val_data, test_data) in enumerate(dataset_combination):
+        for sequence in sequence_lengths:
+            # Initialize the RNN model
+            train_loader = create_dataloader(train_data, batch_size, sequence, shuffle=False)
+            val_loader = create_dataloader(val_data, batch_size, sequence, shuffle=False)
+            test_loader = create_dataloader(test_data, batch_size, sequence, shuffle=False)
+            rnn_model = RNN(input_dim, hidden_size, num_layers, input_dim, sequence)
 
-        if val_loss < best_loss:
-            best_loss = val_loss    
-            patience = patience_start  # Reset patience counter
+            # Initialize the optimizer
+            optimizer = optim.Adam(rnn_model.parameters(), lr=learning_rate)
 
-        else:
-            patience -= 1
-            if patience == 0:   
+            # Initialize the scheduler
+            scheduler = CosineWarmupScheduler(optimizer, warmup=20, max_iters=epochs)
 
-                best_training_loss = training_losses[-start_point]
-                best_val_loss = val_losses[-start_point]
-                training_time = datetime.now() - start_training_time
-                return best_training_loss, best_val_loss, training_time
+            # Loss function
+            loss_fn = nn.MSELoss()
+            patience_start = 40
+            if patience_start > epochs:
+                patience_start = epochs
+            else:
+                patience_start = 40
+            start_point = patience_start
+            training_losses = []
+            val_losses = []
+            best_loss = float("inf")
+            best_epoch = 0
+
+            start_time = time.time()
             
-    best_training_loss = training_losses[-1]
-    best_val_loss = val_losses[-1]
-    training_time = datetime.now() - start_training_time
-    return  best_training_loss, best_val_loss, training_time
+            for epoch in range(epochs):
+                # Train the model
+                train_results = train(rnn_model, train_loader, optimizer, loss_fn)
+                training_losses.append(train_results)
 
+                # Evaluate the model
+                val_results = validation(rnn_model, val_loader, loss_fn)
+                val_losses.append(val_results)
+                if (epoch + 1) % 10 == 0:
+                    print(f"Epoch: {epoch + 1} Train Loss: {train_results}, Validation Loss: {val_results}")
+
+                if val_results < best_loss:
+                    best_loss = val_results
+                    patience = patience_start  # Reset patience counter
+                else:
+                    patience -= 1
+                if patience == 0:
+                    best_training_loss = training_losses[-start_point]
+                    best_val_loss = val_losses[-start_point]
+                    test_loss = test(rnn_model, test_loader, loss_fn)
+                    print("test_loss:", test_loss)
+                    print(f"Best Train Loss: {best_training_loss}, Best Val Loss: {best_val_loss}")
+                    best_epoch = epoch + 1
+                    break 
+
+                elif epoch == epochs - 1:
+                    best_training_loss = training_losses[-patience]
+                    best_val_loss = val_losses[-patience]
+                    test_loss = test(rnn_model, test_loader, loss_fn)
+                    print("test_loss:", test_loss)
+                    print(f"Best Train Loss: {best_training_loss}, Best Val Loss: {best_val_loss}")
+                    best_epoch = epoch + 1
+                    break 
+                # Step the scheduler
+                scheduler.step()
+            
+            end_time = time.time()
+            
+            predicted_sequence, true_sequence = seq_prediction(rnn_model, test_data, sequence, sequence)
+            
+            training_result = {
+                "combination_index": i + 1,
+                "sequence_length": sequence,
+                "training_time": end_time - start_time,
+                "best_training_loss": best_training_loss,
+                "best_val_loss": best_val_loss,
+                "test_loss": test_loss,
+                "best_epoch": best_epoch,
+                "predicted_sequence": predicted_sequence,
+                "true_sequence": true_sequence
+            }
+            
+            results["training_results"].append(training_result)
     
-
+    # Save results to JSON file in the same folder as the dataset file
+    folder_path = os.path.dirname(file_path)
+    json_file_path = os.path.join(folder_path, 'training_results.json')
+    
+    with open(json_file_path, 'w') as json_file:
+        json.dump(results, json_file, indent=4)
 
 if __name__ == "__main__":
-
-    sequence_length = 50  # Eingabelänge (Anzahl Zeitpunkte)
-    future_steps = sequence_length     # Anzahl der vorherzusagenden Schritte
-    batch_size = 128
-    epochs = 40
-    hidden_size = 80
-    input_size = 3
-    output_size = 3
-    learning_rate = 0.001
-    num_layers = 2
-
-        # Your existing code
-
-    dim_feedforward = 64
+    # Example usage
+    file_path = '/Users/Aleksandar/Documents/Uni/FP/Modeling_Dynamic_Systems/DynSys_and_DataSets/lorenz_system/lorenz_system_data.csv'
+    batch_size = 64
+    epochs = 200
+    input_dim = 3  # Number of features
+    hidden_size = 64
     num_layers = 1
     dropout = 0.0
-    input_dropout = 0.0
-    learning_rate = 0.001
+    learning_rate = 0.0
 
-    # Load and preprocess data
-    file_path = '/Users/Aleksandar/Documents/Uni/FP/Modeling_Dynamic_Systems/DynSys_and_DataSets/lorenz_system/lorenz_system_data.csv'
-    train_data, val_data, test_data = split_and_normalize_dataset(file_path)
+    sequence_lengths = [0.5, 1.0, 2.0, 5.0]
+    sequence_lengths = [int(x * 50) for x in sequence_lengths]
 
-    # Create dataloaders
-    train_loader = create_dataloader(train_data, batch_size, sequence_length, shuffle=False)
-    val_loader = create_dataloader(val_data, batch_size, sequence_length, shuffle=False)
-    test_loader = create_dataloader(test_data, batch_size, sequence_length, shuffle=False)
-
-    # Initialize the model
-    model = RNN(input_size=input_size, hidden_size=hidden_size, num_layers=num_layers, num_classes=output_size)
-
-    # Initialize the optimizer
-    optimizer = optim.Adam(model.parameters(), lr=learning_rate)
-
-    # Initialize the scheduler
-    scheduler = CosineWarmupScheduler(optimizer, warmup=10, max_iters=epochs)
-
-    # Loss function
-    loss_fn = nn.MSELoss()
-    patience_start = 40
-    if patience_start > epochs:
-        patience_start = epochs
-    else:
-        patience_start = 50
-    start_point = patience_start
-    training_losses = []
-    val_losses = []
-    best_loss = float("inf")
-
-    for epoch in range(epochs):
-        # Train the model
-        train_results = train(model, train_loader, optimizer,future_steps, loss_fn)
-        training_losses.append(train_results)
-
-        # Evaluate the model
-        val_results = validation(model, val_loader,future_steps, loss_fn)
-        val_losses.append(val_results)
-        if (epoch + 1) % 10 == 0:
-            print(f"Epoch: {epoch + 1} Train Loss: {train_results}, Validation Loss: {val_results}")
-
-        if val_results < best_loss:
-            best_loss = val_results
-            patience = patience_start  # Reset patience counter
-        else:
-            patience -= 1
-        if patience == 0 :
-            best_training_loss = training_losses[-start_point]
-            best_val_loss = val_losses[-start_point]
-            test_loss = test(model, test_loader,future_steps, loss_fn)
-            print("test_loss:", test_loss)
-            print(f"Best Train Loss: {best_training_loss}, Best Val Loss: {best_val_loss}")
-            break 
-        if epoch == epochs - 1 :
-            best_training_loss = training_losses[patience-start_point]
-            best_val_loss = val_losses[patience-start_point]
-            test_loss = test(model, test_loader,future_steps, loss_fn)
-            print("test_loss:", test_loss)
-            print(f"Best Train Loss: {best_training_loss}, Best Val Loss: {best_val_loss}")
-            break 
-
-
-        # Step the scheduler
-        scheduler.step()
-
-    plot_predictions(model, test_data, sequence_length)
-    
+    save_training_results(file_path, batch_size, epochs, input_dim, hidden_size, num_layers, dropout, learning_rate, sequence_lengths)
 
 
 
