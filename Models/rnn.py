@@ -22,9 +22,9 @@ class RNN(nn.Module):
         self.num_layers = num_layers
         self.hidden_size = hidden_size
         self.rnn = nn.RNN(input_size, hidden_size, num_layers, batch_first= True)
-        self.fc1 = nn.Linear(hidden_size, int(hidden_size/2))
-        self.relu1=nn.ReLU()
-        self.fc2 = nn.Linear(int(hidden_size/2), num_classes)
+        self.fc1 = nn.Linear(hidden_size, num_classes)
+        #self.relu1=nn.ReLU()
+        #self.fc2 = nn.Linear(int(hidden_size/2), num_classes)
 
 
     def forward(self, x):
@@ -36,10 +36,10 @@ class RNN(nn.Module):
         hidden_state : num_layers, batch_size, hidden_size
         """ 
         
-        h0 = torch.zeros(self.num_layers, x.size(0), self.hidden_size).to("mps")
+        h0 = torch.zeros(self.num_layers, x.size(0), self.hidden_size).to(x.device)
+        #c0 = torch.zeros(self.num_layers, x.size(0), self.hidden_size).to(x.device)
         out, _ = self.rnn(x, h0)
-        out = self.fc(out)
-
+        out = self.fc1(out)
         return out
 
     
@@ -302,7 +302,7 @@ def plot_predictions(model, data, sequence_length):
 
 
     # Get the actual future steps
-    actual_future = data[start_idx + sequence_length:start_idx + sequence_length + future_steps].to(device)
+    actual_future = data[start_idx + sequence_length:start_idx + sequence_length + sequence_length].to(device)
 
     # Predict future steps
     with torch.no_grad():
@@ -314,18 +314,18 @@ def plot_predictions(model, data, sequence_length):
     predicted_future = predicted_future.cpu().tolist()
     
     # Plot the results in 2D
-    time_steps = list(range(future_steps))
+    time_steps = list(range(sequence_length))
     plt.figure(figsize=(12, 6))
 
     # Plot x
-    plt.subplot(2, 1, 1)
+    plt.subplot(3, 1, 1)
     plt.plot(time_steps, [x[0] for x in actual_future], label='Actual Future')
     plt.plot(time_steps, [x[0] for x in predicted_future], label='Predicted Future')
     plt.title('X')
     plt.legend()
 
     # Plot y
-    plt.subplot(2, 1, 2)
+    plt.subplot(3, 1, 2)
     plt.plot(time_steps, [x[1] for x in actual_future], label='Actual Future')
     plt.plot(time_steps, [x[1] for x in predicted_future], label='Predicted Future')
     plt.title('Y')
@@ -432,27 +432,29 @@ def save_training_results(file_path, batch_size, epochs, input_dim, hidden_size,
         "training_results": []
     }
 
-    for i, (train_data, val_data, test_data) in enumerate(dataset_combination):
-        for sequence in sequence_lengths:
+        
+    for sequence in sequence_lengths:
+        for i, (train_data, val_data, test_data) in enumerate(dataset_combination):
+
             # Initialize the RNN model
             train_loader = create_dataloader(train_data, batch_size, sequence, shuffle=False)
             val_loader = create_dataloader(val_data, batch_size, sequence, shuffle=False)
             test_loader = create_dataloader(test_data, batch_size, sequence, shuffle=False)
-            rnn_model = RNN(input_dim, hidden_size, num_layers, input_dim, sequence)
+            rnn_model = RNN(input_dim, hidden_size, num_layers, input_dim)
 
             # Initialize the optimizer
-            optimizer = optim.Adam(rnn_model.parameters(), lr=learning_rate)
+            optimizer = optim.AdamW(rnn_model.parameters(), lr=learning_rate, weight_decay=1e-2)
 
             # Initialize the scheduler
             scheduler = CosineWarmupScheduler(optimizer, warmup=20, max_iters=epochs)
 
             # Loss function
             loss_fn = nn.MSELoss()
-            patience_start = 40
+            patience_start = 50
             if patience_start > epochs:
                 patience_start = epochs
             else:
-                patience_start = 40
+                patience_start = 50
             start_point = patience_start
             training_losses = []
             val_losses = []
@@ -463,11 +465,11 @@ def save_training_results(file_path, batch_size, epochs, input_dim, hidden_size,
             
             for epoch in range(epochs):
                 # Train the model
-                train_results = train(rnn_model, train_loader, optimizer, loss_fn)
+                train_results = train(rnn_model, train_loader, optimizer,sequence_lengths, loss_fn)
                 training_losses.append(train_results)
 
                 # Evaluate the model
-                val_results = validation(rnn_model, val_loader, loss_fn)
+                val_results = validation(rnn_model, val_loader, sequence_lengths,loss_fn)
                 val_losses.append(val_results)
                 if (epoch + 1) % 10 == 0:
                     print(f"Epoch: {epoch + 1} Train Loss: {train_results}, Validation Loss: {val_results}")
@@ -480,16 +482,16 @@ def save_training_results(file_path, batch_size, epochs, input_dim, hidden_size,
                 if patience == 0:
                     best_training_loss = training_losses[-start_point]
                     best_val_loss = val_losses[-start_point]
-                    test_loss = test(rnn_model, test_loader, loss_fn)
+                    test_loss = test(rnn_model, test_loader,sequence_lengths, loss_fn)
                     print("test_loss:", test_loss)
                     print(f"Best Train Loss: {best_training_loss}, Best Val Loss: {best_val_loss}")
                     best_epoch = epoch + 1
                     break 
 
                 elif epoch == epochs - 1:
-                    best_training_loss = training_losses[-patience]
-                    best_val_loss = val_losses[-patience]
-                    test_loss = test(rnn_model, test_loader, loss_fn)
+                    best_training_loss = training_losses[patience-start_point-1]
+                    best_val_loss = val_losses[patience-start_point-1]
+                    test_loss = test(rnn_model, test_loader, sequence_lengths,loss_fn)
                     print("test_loss:", test_loss)
                     print(f"Best Train Loss: {best_training_loss}, Best Val Loss: {best_val_loss}")
                     best_epoch = epoch + 1
@@ -517,22 +519,21 @@ def save_training_results(file_path, batch_size, epochs, input_dim, hidden_size,
     
     # Save results to JSON file in the same folder as the dataset file
     folder_path = os.path.dirname(file_path)
-    json_file_path = os.path.join(folder_path, 'training_results.json')
+    json_file_path = os.path.join(folder_path, 'lorenz_lstm.json')
     
     with open(json_file_path, 'w') as json_file:
         json.dump(results, json_file, indent=4)
 
 if __name__ == "__main__":
     # Example usage
-    file_path = '/Users/Aleksandar/Documents/Uni/FP/Modeling_Dynamic_Systems/DynSys_and_DataSets/lorenz_system/lorenz_system_data.csv'
+    file_path = '/home_net/ge36xax/projects/Modeling_Dynamic_Systems/DynSys_and_DataSets/lorenz_system/lorenz_system_data.csv'
     batch_size = 64
     epochs = 200
     input_dim = 3  # Number of features
     hidden_size = 64
     num_layers = 1
     dropout = 0.0
-    learning_rate = 0.0
-
+    learning_rate = 0.001
     sequence_lengths = [0.5, 1.0, 2.0, 5.0]
     sequence_lengths = [int(x * 50) for x in sequence_lengths]
 
