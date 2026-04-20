@@ -1,7 +1,5 @@
-# Modeling_Dynamic_Systems
-Forschungspraxis an dem Lehrstuhl ITR
-
-# Modeling Dynamical Systems
+# Modeling Dynamical Systems  
+Research Project at the Chair of Information-Oriented Control, Technical University of Munich (TUM)
 
 ## Project Overview
 This project focuses on the modeling and comparison of different approaches for time series prediction of dynamical systems.  
