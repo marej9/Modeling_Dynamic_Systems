@@ -100,7 +100,7 @@ The goal is to analyze machine learning models and system-theoretic methods acro
 
 ## Additional Resources
 
-- Report: [Add your PDF link here]  
+- Report: [https://github.com/marej9/Modeling_Dynamic_Systems/blob/main/How_to_Model_Dynamical_Systems_report.pdf]  
 - Presentation: [https://github.com/marej9/Modeling_Dynamic_Systems/blob/main/How%20to%20Model%20Dynamical%20Systems_presentation.pdf]  
 
 ---
